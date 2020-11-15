@@ -95,11 +95,15 @@ impl VaultCommmand for RegisterExperiment {
             Some(d) => Vault::new_from_dir(d.as_str()),
             None => Vault::new(),
         }?;
-        // TODO (rohany): Check that this experiment doesn't exist already.
-        // Add the new experiment to the metadata.
-        vault.metadata_handle.meta.experiments.push(Experiment { name: self.experiment.to_string() });
-        // Flush the changes.
-        vault.metadata_handle.flush()?;
+        match vault.metadata_handle.meta.experiments.iter().find(|e| e.name == self.experiment.as_str()) {
+            Some(_) => return Err(VaultError::DuplicateExperimentError(self.experiment.clone())),
+            None => {
+                // Add the new experiment to the metadata.
+                vault.metadata_handle.meta.experiments.push(Experiment { name: self.experiment.to_string() });
+                // Flush the changes.
+                vault.metadata_handle.flush()?;
+            }
+        };
         Ok(())
     }
 }
@@ -150,6 +154,7 @@ pub struct Meta {
 // TODO (rohany): Comment this.
 #[derive(Debug)]
 pub enum VaultError {
+    DuplicateExperimentError(String),
     UnsetInstanceDirectory,
     #[allow(dead_code)]
     InvalidInstanceDirectory(String),
@@ -161,6 +166,7 @@ pub enum VaultError {
 impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            VaultError::DuplicateExperimentError(s) => write!(f, "experiment {} already exists", s),
             VaultError::Unimplemented(s) => write!(f, "unimplemented command: {:?}", s),
             VaultError::IOError(e) => write!(f, "IO error: {}", e),
             VaultError::SerializationError(s) => write!(f, "Serialization error: {}", s),
@@ -370,7 +376,7 @@ mod add_meta {
 
 #[cfg(test)]
 mod register {
-    use crate::vault::{RegisterExperiment, VaultCommmand, VaultMetaHandle, Experiment};
+    use crate::vault::{RegisterExperiment, VaultCommmand, VaultMetaHandle, Experiment, VaultError};
 
     // Tests for the register command driver.
     #[test]
@@ -395,5 +401,25 @@ mod register {
 
         let handle = VaultMetaHandle::new(path.as_str()).unwrap();
         assert_eq!(handle.meta.experiments, vec![Experiment{name: "exp1".to_string()}, Experiment{name: "exp2".to_string()}]);
+    }
+
+    #[test]
+    fn no_duplicate_experiments() {
+        let dir = tempdir::TempDir::new("register").unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let _ = RegisterExperiment {
+            directory: Some(path.clone()),
+            experiment: "exp".to_string(),
+        }.execute().unwrap();
+        // We should get an error attempting to register the same experiment twice.
+        let res = RegisterExperiment {
+            directory: Some(path.clone()),
+            experiment: "exp".to_string(),
+        }.execute();
+        match res {
+            Ok(_) => panic!("Expected error, found success!"),
+            Err(VaultError::DuplicateExperimentError(_)) => {},
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
     }
 }
