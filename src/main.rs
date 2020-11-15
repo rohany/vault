@@ -27,11 +27,10 @@ mod cli;
 mod vault;
 use structopt::StructOpt;
 
-
 fn main() {
     let args = cli::Commands::from_args();
     match vault::dispatch_command_line(args) {
-        Ok(..) => {},
-        Err(e) => println!("Error: {}", e)
+        Ok(..) => {}
+        Err(e) => println!("Error: {}", e),
     }
 }

@@ -1,8 +1,8 @@
 use crate::cli;
-use serde::{Serialize, Deserialize};
 use serde::de;
-use std::{env, fmt, fs, io, result, path};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::{env, fmt, fs, io, path, result};
 
 pub type Result<T> = result::Result<T, VaultError>;
 
@@ -12,9 +12,7 @@ trait VaultCommmand {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Experiment {
-    pub name: String
-
-    // Maybe this has a pointer to the latest version of an experiment?
+    pub name: String, // Maybe this has a pointer to the latest version of an experiment?
 }
 
 #[allow(dead_code)]
@@ -27,7 +25,7 @@ struct ExperimentInstance {
 // TODO (rohany): Comment this
 #[derive(Serialize, Deserialize, Default)]
 struct ExperimentMetaCollection {
-    metas: Vec<ExperimentMeta>
+    metas: Vec<ExperimentMeta>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -49,17 +47,17 @@ struct Vault {
 }
 
 impl Vault {
-    pub fn new () -> Result<Vault> {
+    pub fn new() -> Result<Vault> {
         let base_dir = match env::var_os("VAULT_DIR") {
             Some(dir) => dir,
-            None => return Err(VaultError::UnsetInstanceDirectory)
+            None => return Err(VaultError::UnsetInstanceDirectory),
         };
         Vault::new_from_dir(base_dir.to_str().unwrap())
     }
-    pub fn new_from_dir (instance_dir: &str) -> Result<Vault> {
+    pub fn new_from_dir(instance_dir: &str) -> Result<Vault> {
         Ok(Vault {
             base_dir: instance_dir.to_string(),
-            metadata_handle: VaultMetaHandle::new(instance_dir)?
+            metadata_handle: VaultMetaHandle::new(instance_dir)?,
         })
     }
 }
@@ -78,14 +76,20 @@ impl VaultCommmand for AddExperimentMeta {
         // Get a handle on the experiment's metadata.
         let mut handle = ExperimentMetaCollectionHandle::new(self.directory.as_str())?;
         // See if this key exists already.
-        match handle.meta.metas
+        match handle
+            .meta
+            .metas
             .iter_mut()
             .filter(|m| m.key.as_str() == self.key.as_str())
-            .next() {
+            .next()
+        {
             // If the key exists already, replace the value with the new one.
             Some(v) => v.value = self.value.clone(),
             // Otherwise, add the new key.
-            None => handle.meta.metas.push(ExperimentMeta {key: self.key.clone(), value: self.value.clone()})
+            None => handle.meta.metas.push(ExperimentMeta {
+                key: self.key.clone(),
+                value: self.value.clone(),
+            }),
         }
         handle.flush()?;
         Ok(())
@@ -105,11 +109,23 @@ impl VaultCommmand for RegisterExperiment {
             Some(d) => Vault::new_from_dir(d.as_str()),
             None => Vault::new(),
         }?;
-        match vault.metadata_handle.meta.experiments.iter().find(|e| e.name == self.experiment.as_str()) {
-            Some(_) => return Err(VaultError::DuplicateExperimentError(self.experiment.clone())),
+        match vault
+            .metadata_handle
+            .meta
+            .experiments
+            .iter()
+            .find(|e| e.name == self.experiment.as_str())
+        {
+            Some(_) => {
+                return Err(VaultError::DuplicateExperimentError(
+                    self.experiment.clone(),
+                ))
+            }
             None => {
                 // Add the new experiment to the metadata.
-                vault.metadata_handle.meta.experiments.push(Experiment { name: self.experiment.to_string() });
+                vault.metadata_handle.meta.experiments.push(Experiment {
+                    name: self.experiment.to_string(),
+                });
                 // Flush the changes.
                 vault.metadata_handle.flush()?;
             }
@@ -181,12 +197,12 @@ impl fmt::Display for VaultError {
             VaultError::IOError(e) => write!(f, "IO error: {}", e),
             VaultError::SerializationError(s) => write!(f, "Serialization error: {}", s),
             VaultError::InvalidInstanceDirectory(_) => write!(f, "ROHANY WRITE A MESSAGE HERE"),
-            VaultError::UnsetInstanceDirectory => write!(f, "please set VAULT_DIR in your environment"),
+            VaultError::UnsetInstanceDirectory => {
+                write!(f, "please set VAULT_DIR in your environment")
+            }
         }
     }
 }
-
-
 
 struct FileHandle {
     filename: String,
@@ -195,7 +211,9 @@ struct FileHandle {
 // TODO (rohany): Comment this up.
 impl FileHandle {
     fn new(filename: &str) -> FileHandle {
-        FileHandle { filename: filename.to_string() }
+        FileHandle {
+            filename: filename.to_string(),
+        }
     }
 
     fn file(&mut self) -> Result<Option<fs::File>> {
@@ -203,11 +221,13 @@ impl FileHandle {
         let file = match fs::File::open(self.filename.as_str()) {
             Ok(f) => f,
             // If an error is returned, see what kind of error we got.
-            Err(e) => return match e.kind() {
-                // If the error says that the file doesn't exist, then we just return None.
-                io::ErrorKind::NotFound => Ok(None),
-                // Otherwise, forward the error up the chain.
-                _ => Err(VaultError::IOError(e)),
+            Err(e) => {
+                return match e.kind() {
+                    // If the error says that the file doesn't exist, then we just return None.
+                    io::ErrorKind::NotFound => Ok(None),
+                    // Otherwise, forward the error up the chain.
+                    _ => Err(VaultError::IOError(e)),
+                };
             }
         };
         Ok(Some(file))
@@ -215,7 +235,10 @@ impl FileHandle {
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         // Open up the handle's file to read from.
-        let fo = fs::OpenOptions::new().write(true).create(true).open(self.filename.as_str());
+        let fo = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(self.filename.as_str());
         let mut file = wrap_io_error(fo)?;
         let _ = wrap_io_error(file.write(bytes))?;
         Ok(())
@@ -245,7 +268,10 @@ impl VaultMetaHandle {
     }
 }
 
-impl<T> MetadataHandle<T> where T:de::DeserializeOwned + Serialize + Default {
+impl<T> MetadataHandle<T>
+where
+    T: de::DeserializeOwned + Serialize + Default,
+{
     fn new_from_dir(dir: &str, name: &str) -> Result<MetadataHandle<T>> {
         // TODO (rohany): Validate that the input directory actually does exist.
         let path = path::Path::new(dir).join(name);
@@ -259,12 +285,15 @@ impl<T> MetadataHandle<T> where T:de::DeserializeOwned + Serialize + Default {
     fn new_from_file(filename: &str) -> Result<MetadataHandle<T>> {
         // Create a handle from the input filename.
         let handle = FileHandle::new(filename);
-        let mut result = MetadataHandle { handle, meta: T::default() };
+        let mut result = MetadataHandle {
+            handle,
+            meta: T::default(),
+        };
         // Now depending on whether the file exists already, read existing metadata.
         match result.handle.file()? {
             // If we have a file, go ahead and read it.
             // TODO (rohany): Do some validation on the metadata we just read.
-            Some(f) => { result.meta = vault_serde::deserialize_from_reader(f)? },
+            Some(f) => result.meta = vault_serde::deserialize_from_reader(f)?,
             // Otherwise, do nothing.
             None => {}
         };
@@ -272,7 +301,8 @@ impl<T> MetadataHandle<T> where T:de::DeserializeOwned + Serialize + Default {
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.handle.write(vault_serde::serialize(&self.meta)?.as_bytes())
+        self.handle
+            .write(vault_serde::serialize(&self.meta)?.as_bytes())
     }
 }
 
@@ -286,53 +316,68 @@ struct VaultMeta {
 fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
     match r {
         Ok(v) => Ok(v),
-        Err(e) => Err(VaultError::IOError(e))
+        Err(e) => Err(VaultError::IOError(e)),
     }
 }
 
 /// dispatch_command_line takes a cli::Commands and dispatches to the
 /// corresponding vault execution code.
-pub fn dispatch_command_line (args: cli::Commands) -> Result<()> {
-  // We could not do an allocation here and instead just call the trait
-  // method in each of the cases, but I wanted to play around with traits.
-  let command : Box<dyn VaultCommmand> = match args {
-      cli::Commands::AddMeta {directory, key, value} => {
-          Box::new(AddExperimentMeta { directory, key, value })
-      },
-      cli::Commands::Register {experiment} => {
-          Box::new(RegisterExperiment { directory: None, experiment })
-      },
-      cli::Commands::Store { experiment, directory } => {
-          Box::new(StoreExperimentInstance { experiment, directory })
-      },
-      cli::Commands::GetLatest { experiment } => {
-          Box::new(GetLatestInstance { experiment })
-      }
-      cmd => panic!("unhandled command {:?}", cmd)
-  };
-  command.execute()
+pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
+    // We could not do an allocation here and instead just call the trait
+    // method in each of the cases, but I wanted to play around with traits.
+    let command: Box<dyn VaultCommmand> = match args {
+        cli::Commands::AddMeta {
+            directory,
+            key,
+            value,
+        } => Box::new(AddExperimentMeta {
+            directory,
+            key,
+            value,
+        }),
+        cli::Commands::Register { experiment } => Box::new(RegisterExperiment {
+            directory: None,
+            experiment,
+        }),
+        cli::Commands::Store {
+            experiment,
+            directory,
+        } => Box::new(StoreExperimentInstance {
+            experiment,
+            directory,
+        }),
+        cli::Commands::GetLatest { experiment } => Box::new(GetLatestInstance { experiment }),
+        cmd => panic!("unhandled command {:?}", cmd),
+    };
+    command.execute()
 }
 
 /// vault_serde contains utility serialization and deserialization routines.
 mod vault_serde {
     use crate::vault::{Result, VaultError};
     use serde::de;
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
     use std::io;
 
     /// serialize is a wrapper around a particular serde serialization method
     /// so that we can change which package is used easily.
-    pub fn serialize<T>(value: &T) -> Result<String> where T:?Sized + Serialize {
+    pub fn serialize<T>(value: &T) -> Result<String>
+    where
+        T: ?Sized + Serialize,
+    {
         match serde_json::to_string(value) {
             Ok(s) => Ok(s),
-            Err(e) => Err(VaultError::SerializationError(e.to_string()))
+            Err(e) => Err(VaultError::SerializationError(e.to_string())),
         }
     }
 
     /// deserialize is a wrapper around a particular serde deserialization
     /// method so that we change which package is used easily.
     #[allow(dead_code)]
-    pub fn deserialize<'a, T>(s: &'a str) -> Result<T> where T:?Sized + Deserialize<'a> {
+    pub fn deserialize<'a, T>(s: &'a str) -> Result<T>
+    where
+        T: ?Sized + Deserialize<'a>,
+    {
         match serde_json::from_str(s) {
             Ok(v) => Ok(v),
             Err(e) => Err(VaultError::SerializationError(e.to_string())),
@@ -341,7 +386,11 @@ mod vault_serde {
 
     /// deserialize_from_reader is a wrapper around a particular serde deserialization
     /// method so that we change which package is used easily.
-    pub fn deserialize_from_reader<T, R>(r: R) -> Result<T> where T:?Sized + de::DeserializeOwned, R:io::Read {
+    pub fn deserialize_from_reader<T, R>(r: R) -> Result<T>
+    where
+        T: ?Sized + de::DeserializeOwned,
+        R: io::Read,
+    {
         match serde_json::from_reader(r) {
             Ok(v) => Ok(v),
             Err(e) => Err(VaultError::SerializationError(e.to_string())),
@@ -351,12 +400,14 @@ mod vault_serde {
 
 #[cfg(test)]
 mod add_meta {
+    use crate::vault::{
+        AddExperimentMeta, ExperimentMeta, ExperimentMetaCollectionHandle, VaultCommmand,
+    };
     use tempdir;
-    use crate::vault::{AddExperimentMeta, VaultCommmand, ExperimentMeta, ExperimentMetaCollectionHandle};
 
     // Tests for the add-meta command driver.
     #[test]
-    fn basic () {
+    fn basic() {
         let dir = tempdir::TempDir::new("add-meta").unwrap();
         let path = dir.path().to_str().unwrap().to_string();
         // Add some metadata to an empty experiment.
@@ -364,23 +415,42 @@ mod add_meta {
             directory: path.clone(),
             key: "key".parse().unwrap(),
             value: "value".parse().unwrap(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
         // We should find this data now in the metadata.
         let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(handle.meta.metas, vec![ExperimentMeta{key: "key".to_string(), value:"value".to_string()}]);
+        assert_eq!(
+            handle.meta.metas,
+            vec![ExperimentMeta {
+                key: "key".to_string(),
+                value: "value".to_string()
+            }]
+        );
 
         // If we add another key-value then we should find it as well.
         let _ = AddExperimentMeta {
             directory: path.clone(),
             key: "key2".parse().unwrap(),
             value: "value2".parse().unwrap(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
 
         let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(handle.meta.metas, vec![
-            ExperimentMeta{key: "key".to_string(), value:"value".to_string()},
-            ExperimentMeta{key: "key2".to_string(), value:"value2".to_string()},
-        ])
+        assert_eq!(
+            handle.meta.metas,
+            vec![
+                ExperimentMeta {
+                    key: "key".to_string(),
+                    value: "value".to_string()
+                },
+                ExperimentMeta {
+                    key: "key2".to_string(),
+                    value: "value2".to_string()
+                },
+            ]
+        )
     }
 
     #[test]
@@ -392,23 +462,35 @@ mod add_meta {
             directory: path.clone(),
             key: "key".parse().unwrap(),
             value: "value".parse().unwrap(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
         // Adding the same value again shouldn't result an an error and should
         // overwrite the value in the experiment.
         let _ = AddExperimentMeta {
             directory: path.clone(),
             key: "key".parse().unwrap(),
             value: "value2".parse().unwrap(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
         // We should find this data now in the metadata.
         let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(handle.meta.metas, vec![ExperimentMeta{key: "key".to_string(), value:"value2".to_string()}]);
+        assert_eq!(
+            handle.meta.metas,
+            vec![ExperimentMeta {
+                key: "key".to_string(),
+                value: "value2".to_string()
+            }]
+        );
     }
 }
 
 #[cfg(test)]
 mod register {
-    use crate::vault::{RegisterExperiment, VaultCommmand, VaultMetaHandle, Experiment, VaultError};
+    use crate::vault::{
+        Experiment, RegisterExperiment, VaultCommmand, VaultError, VaultMetaHandle,
+    };
 
     // Tests for the register command driver.
     #[test]
@@ -418,21 +500,40 @@ mod register {
         let _ = RegisterExperiment {
             directory: Some(path.clone()),
             experiment: "exp1".to_string(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
 
         // We should find this experiment registered.
         // TODO (rohany): Refactor this to a contains API, rather than inspecting the implementation.
         let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert_eq!(handle.meta.experiments, vec![Experiment{name: "exp1".to_string()}]);
+        assert_eq!(
+            handle.meta.experiments,
+            vec![Experiment {
+                name: "exp1".to_string()
+            }]
+        );
 
         // Add another experiment, and expect to find it.
         let _ = RegisterExperiment {
             directory: Some(path.clone()),
             experiment: "exp2".to_string(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
 
         let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert_eq!(handle.meta.experiments, vec![Experiment{name: "exp1".to_string()}, Experiment{name: "exp2".to_string()}]);
+        assert_eq!(
+            handle.meta.experiments,
+            vec![
+                Experiment {
+                    name: "exp1".to_string()
+                },
+                Experiment {
+                    name: "exp2".to_string()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -442,15 +543,18 @@ mod register {
         let _ = RegisterExperiment {
             directory: Some(path.clone()),
             experiment: "exp".to_string(),
-        }.execute().unwrap();
+        }
+        .execute()
+        .unwrap();
         // We should get an error attempting to register the same experiment twice.
         let res = RegisterExperiment {
             directory: Some(path.clone()),
             experiment: "exp".to_string(),
-        }.execute();
+        }
+        .execute();
         match res {
             Ok(_) => panic!("Expected error, found success!"),
-            Err(VaultError::DuplicateExperimentError(_)) => {},
+            Err(VaultError::DuplicateExperimentError(_)) => {}
             Err(e) => panic!("Unexpected error: {}", e),
         }
     }
