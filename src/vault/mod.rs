@@ -75,10 +75,20 @@ struct AddExperimentMeta {
 
 impl VaultCommmand for AddExperimentMeta {
     fn execute(&self) -> Result<()> {
+        // Get a handle on the experiment's metadata.
         let mut handle = ExperimentMetaCollectionHandle::new(self.directory.as_str())?;
-        // TODO (rohany): This should check if the key exist and modify it if so.
-        handle.meta.metas.push(ExperimentMeta {key: self.key.clone(), value: self.value.clone()});
-        handle.flush()
+        // See if this key exists already.
+        match handle.meta.metas
+            .iter_mut()
+            .filter(|m| m.key.as_str() == self.key.as_str())
+            .next() {
+            // If the key exists already, replace the value with the new one.
+            Some(v) => v.value = self.value.clone(),
+            // Otherwise, add the new key.
+            None => handle.meta.metas.push(ExperimentMeta {key: self.key.clone(), value: self.value.clone()})
+        }
+        handle.flush()?;
+        Ok(())
     }
 }
 
@@ -371,6 +381,28 @@ mod add_meta {
             ExperimentMeta{key: "key".to_string(), value:"value".to_string()},
             ExperimentMeta{key: "key2".to_string(), value:"value2".to_string()},
         ])
+    }
+
+    #[test]
+    fn no_duplicates() {
+        let dir = tempdir::TempDir::new("add-meta").unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        // Add some metadata to an empty experiment.
+        let _ = AddExperimentMeta {
+            directory: path.clone(),
+            key: "key".parse().unwrap(),
+            value: "value".parse().unwrap(),
+        }.execute().unwrap();
+        // Adding the same value again shouldn't result an an error and should
+        // overwrite the value in the experiment.
+        let _ = AddExperimentMeta {
+            directory: path.clone(),
+            key: "key".parse().unwrap(),
+            value: "value2".parse().unwrap(),
+        }.execute().unwrap();
+        // We should find this data now in the metadata.
+        let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
+        assert_eq!(handle.meta.metas, vec![ExperimentMeta{key: "key".to_string(), value:"value2".to_string()}]);
     }
 }
 
