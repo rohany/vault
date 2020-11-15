@@ -170,41 +170,7 @@ impl fmt::Display for VaultError {
     }
 }
 
-// Can maybe move this stuff into a separate module.
 
-/// serialize is a wrapper around a particular serde serialization method
-/// so that we can change which package is used easily.
-fn serialize<T>(value: &T) -> Result<String> where T:?Sized + Serialize {
-    match serde_json::to_string(value) {
-        Ok(s) => Ok(s),
-        Err(e) => Err(VaultError::SerializationError(e.to_string()))
-    }
-}
-/// deserialize is a wrapper around a particular serde deserialization
-/// method so that we change which package is used easily.
-#[allow(dead_code)]
-fn deserialize<'a, T>(s: &'a str) -> Result<T> where T:?Sized + Deserialize<'a> {
-    match serde_json::from_str(s) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(VaultError::SerializationError(e.to_string())),
-    }
-}
-/// deserialize_from_reader is a wrapper around a particular serde deserialization
-/// method so that we change which package is used easily.
-fn deserialize_from_reader<T, R>(r: R) -> Result<T> where T:?Sized + de::DeserializeOwned, R:io::Read {
-    match serde_json::from_reader(r) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(VaultError::SerializationError(e.to_string())),
-    }
-}
-
-/// wrap_io_error unwraps an io::Result into a vault::Result.
-fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
-    match r {
-        Ok(v) => Ok(v),
-        Err(e) => Err(VaultError::IOError(e))
-    }
-}
 
 struct FileHandle {
     filename: String,
@@ -282,7 +248,7 @@ impl<T> MetadataHandle<T> where T:de::DeserializeOwned + Serialize + Default {
         match result.handle.file()? {
             // If we have a file, go ahead and read it.
             // TODO (rohany): Do some validation on the metadata we just read.
-            Some(f) => { result.meta = deserialize_from_reader(f)? },
+            Some(f) => { result.meta = vault_serde::deserialize_from_reader(f)? },
             // Otherwise, do nothing.
             None => {}
         };
@@ -290,7 +256,7 @@ impl<T> MetadataHandle<T> where T:de::DeserializeOwned + Serialize + Default {
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.handle.write(serialize(&self.meta)?.as_bytes())
+        self.handle.write(vault_serde::serialize(&self.meta)?.as_bytes())
     }
 }
 
@@ -300,7 +266,13 @@ struct VaultMeta {
     // TODO (rohany): Include a version here?
 }
 
-// End potential module.
+/// wrap_io_error unwraps an io::Result into a vault::Result.
+fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) => Err(VaultError::IOError(e))
+    }
+}
 
 /// dispatch_command_line takes a cli::Commands and dispatches to the
 /// corresponding vault execution code.
@@ -323,6 +295,42 @@ pub fn dispatch_command_line (args: cli::Commands) -> Result<()> {
       cmd => panic!("unhandled command {:?}", cmd)
   };
   command.execute()
+}
+
+/// vault_serde contains utility serialization and deserialization routines.
+mod vault_serde {
+    use crate::vault::{Result, VaultError};
+    use serde::de;
+    use serde::{Serialize, Deserialize};
+    use std::io;
+
+    /// serialize is a wrapper around a particular serde serialization method
+    /// so that we can change which package is used easily.
+    pub fn serialize<T>(value: &T) -> Result<String> where T:?Sized + Serialize {
+        match serde_json::to_string(value) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(VaultError::SerializationError(e.to_string()))
+        }
+    }
+
+    /// deserialize is a wrapper around a particular serde deserialization
+    /// method so that we change which package is used easily.
+    #[allow(dead_code)]
+    pub fn deserialize<'a, T>(s: &'a str) -> Result<T> where T:?Sized + Deserialize<'a> {
+        match serde_json::from_str(s) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(VaultError::SerializationError(e.to_string())),
+        }
+    }
+
+    /// deserialize_from_reader is a wrapper around a particular serde deserialization
+    /// method so that we change which package is used easily.
+    pub fn deserialize_from_reader<T, R>(r: R) -> Result<T> where T:?Sized + de::DeserializeOwned, R:io::Read {
+        match serde_json::from_reader(r) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(VaultError::SerializationError(e.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
