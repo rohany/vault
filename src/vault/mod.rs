@@ -10,6 +10,7 @@ use uuid;
 /// among the different vault functions.
 pub type Result<T> = result::Result<T, VaultError>;
 
+/// VaultCommand is a common trait that command drivers will implement.
 trait VaultCommmand {
     fn execute(&self) -> Result<()>;
 }
@@ -21,34 +22,48 @@ pub struct Experiment {
 
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize, Debug, Default)]
+/// ExperimentInstance is a struct that represents metadata about a particular
+/// instance of an experiment.
 struct ExperimentInstance {
-    // Name of the experiment this is part of?
+    /// The name of the experiment that this is an instance of.
     name: String,
+    /// User-defined metadata about the instance.
     meta: ExperimentMetaCollection,
     // TODO (rohany): Figure out what concrete type we'll use here.
     timestamp: String,
+    /// The stable ID of this instance. It is used to construct the physical
+    /// file path that the instance is stored in.
     id: uuid::Uuid,
 }
 
-// TODO (rohany): Comment this
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+/// ExperimentMetaCollection represents a collection of user-defined experiment
+/// instance metadata.
 struct ExperimentMetaCollection {
+    /// metas is a vector of ExperimentMeta's.
     metas: Vec<ExperimentMeta>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// ExperimentMeta is an individual piece of user-defined experiment instance metadata.
+/// The metadata is a key-value pair. This is currently stored explicitly, but could be
+/// dumped into an unstructured database for richer queries.
 struct ExperimentMeta {
     key: String,
     value: String,
 }
 
+/// Vault is the main structure to interface with a Vault instance.
 struct Vault {
-    #[allow(dead_code)]
+    /// base_dir is the string of the directory that contains the instance.
     base_dir: String,
+    /// metadata_handle is a handle pointing to the instance's metadata.
     metadata_handle: VaultMetaHandle,
 }
 
 impl Vault {
+    /// new creates a new Vault. It uses the environment's VAULT_DIR as the
+    /// instance's base_dir.
     fn new() -> Result<Vault> {
         let base_dir = match env::var_os("VAULT_DIR") {
             Some(dir) => dir,
@@ -56,6 +71,8 @@ impl Vault {
         };
         Vault::new_from_dir(base_dir.to_str().unwrap())
     }
+
+    /// new_from_dir creates a new Vault from the input instance directory.
     fn new_from_dir(instance_dir: &str) -> Result<Vault> {
         // TODO (rohany): Perform some validation on the Vault instance.
         Ok(Vault {
@@ -63,6 +80,8 @@ impl Vault {
             metadata_handle: VaultMetaHandle::new(instance_dir)?,
         })
     }
+
+    /// open_experiment opens a handle to a target experiment.
     fn open_experiment(&mut self, experiment: &str) -> Result<ExperimentHandle> {
         if !self.metadata_handle.meta.contains_experiment(experiment) {
             return Err(VaultError::UnknownExperimentError(experiment.to_string()));
@@ -72,6 +91,8 @@ impl Vault {
         let experiment_dir = format!("{}/{}", self.base_dir, experiment);
         ExperimentHandle::new(experiment_dir.as_str())
     }
+
+    /// register_experiment registers a new experiment in the vault.
     fn register_experiment(&mut self, experiment: &str) -> Result<()> {
         // See if this experiment exists already.
         match self
@@ -97,14 +118,15 @@ impl Vault {
         };
         // Create a directory for this experiment in the vault.
         let dir_name = format!("{}/{}", self.base_dir, experiment);
-        wrap_io_error(fs::create_dir(path::Path::new(&dir_name)))?;
+        util::wrap_io_error(fs::create_dir(path::Path::new(&dir_name)))?;
         Ok(())
     }
 }
 
-/// AddExperimentMeta represents a vault add-meta command.
 #[derive(Debug)]
+/// AddExperimentMeta represents a vault add-meta command.
 struct AddExperimentMeta {
+    /// directory is the directory corresponding to an experiment instance.
     directory: String,
     // TODO (rohany): We could probably just make these &str's.
     key: String,
@@ -263,12 +285,13 @@ impl fmt::Display for VaultError {
     }
 }
 
-// TODO (rohany): Comment this.
+/// ExperimentHandle is a handle to an Experiment directory.
 struct ExperimentHandle {
     directory: String,
 }
 
 impl ExperimentHandle {
+    /// new creates an ExperimentHandle from an input directory.
     fn new(directory: &str) -> Result<ExperimentHandle> {
         match path::Path::new(directory).is_dir() {
             true => Ok(ExperimentHandle {
@@ -278,6 +301,9 @@ impl ExperimentHandle {
         }
     }
 
+    /// store stores the target experiment instance directory into the experiment
+    /// under the target name. This operation performs a recursive copy from the
+    /// target directory into the experiment's directory.
     fn store(&mut self, target: &str, name: &str) -> Result<()> {
         // Create options for the copy.
         let mut options = fs_extra::dir::CopyOptions::new();
@@ -290,18 +316,22 @@ impl ExperimentHandle {
         }
     }
 
+    /// open_instance_meta opens a handle to an experiment instance with the input ID.
     fn open_instance_meta(&mut self, id: &uuid::Uuid) -> Result<ExperimentInstanceHandle> {
         // TODO (rohany): All of these key construction routines should become functions.
         let dir = format!("{}/{}", &self.directory, id.to_string());
         ExperimentInstanceHandle::new(dir.as_str())
     }
 
+    #[allow(dead_code)]
+    /// iter_instances returns an Iterator to all available instances of the experiment.
     fn iter_instances(&mut self) -> Result<InstanceIterator> {
-        let dirs = wrap_io_error(fs::read_dir(&self.directory))?;
+        let dirs = util::wrap_io_error(fs::read_dir(&self.directory))?;
         Ok(InstanceIterator { dirs })
     }
 }
 
+/// InstanceIterator is an Iterator through all instances in an experiment.
 struct InstanceIterator {
     dirs: fs::ReadDir,
 }
@@ -319,18 +349,21 @@ impl Iterator for InstanceIterator {
 }
 
 #[derive(Debug)]
+/// FileHandle is a structure to manage access to a target file.
 struct FileHandle {
     filename: String,
 }
 
-// TODO (rohany): Comment this up.
 impl FileHandle {
+    /// new creates a new FileHandle.
     fn new(filename: &str) -> FileHandle {
         FileHandle {
             filename: filename.to_string(),
         }
     }
 
+    /// file attempts to open the target file and return the underlying fs::File.
+    /// It returns None if the file does not exist.
     fn file(&mut self) -> Result<Option<fs::File>> {
         // Try to open the handle's file.
         let file = match fs::File::open(self.filename.as_str()) {
@@ -348,29 +381,22 @@ impl FileHandle {
         Ok(Some(file))
     }
 
+    /// write writes out the input bytes to the target file. It overwrites and truncates
+    /// the file it already exists.
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         // Open up the handle's file to read from.
         let fo = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .open(self.filename.as_str());
-        let mut file = wrap_io_error(fo)?;
-        let _ = wrap_io_error(file.write(bytes))?;
+        let mut file = util::wrap_io_error(fo)?;
+        let _ = util::wrap_io_error(file.write(bytes))?;
         Ok(())
     }
 }
 
+// Type definitions for standard users of MetadataHandle.
 type ExperimentInstanceHandle = MetadataHandle<ExperimentInstance>;
-type ExperimentMetaCollectionHandle = MetadataHandle<ExperimentMetaCollection>;
-type VaultMetaHandle = MetadataHandle<VaultMeta>;
-
-// TODO (rohany): Comment this.
-#[derive(Debug)]
-struct MetadataHandle<T> {
-    handle: FileHandle,
-    meta: T,
-}
-
 impl ExperimentInstanceHandle {
     fn new(dir: &str) -> Result<ExperimentInstanceHandle> {
         // TODO (rohany): Make this a constant.
@@ -378,6 +404,7 @@ impl ExperimentInstanceHandle {
     }
 }
 
+type ExperimentMetaCollectionHandle = MetadataHandle<ExperimentMetaCollection>;
 impl ExperimentMetaCollectionHandle {
     fn new(dir: &str) -> Result<ExperimentMetaCollectionHandle> {
         // TODO (rohany): Make this a constant.
@@ -385,6 +412,7 @@ impl ExperimentMetaCollectionHandle {
     }
 }
 
+type VaultMetaHandle = MetadataHandle<VaultMeta>;
 impl VaultMetaHandle {
     fn new(dir: &str) -> Result<VaultMetaHandle> {
         // TODO (rohany): Make this a constant.
@@ -392,10 +420,22 @@ impl VaultMetaHandle {
     }
 }
 
+#[derive(Debug)]
+/// MetadataHandle is an abstraction for serialized, persistent metadata. It
+/// can be used to take a handle on arbitrary serialized metadata present in
+/// the file system.
+struct MetadataHandle<T> {
+    handle: FileHandle,
+    meta: T,
+}
+
+/// MetadataHandle is implemented for types that are able to be serialized
+/// and deserialized, as well as having default constructors.
 impl<T> MetadataHandle<T>
 where
     T: de::DeserializeOwned + Serialize + Default,
 {
+    /// new_from_dir creates a MetadataHandle from a parent directory and filename.
     fn new_from_dir(dir: &str, name: &str) -> Result<MetadataHandle<T>> {
         // TODO (rohany): Validate that the input directory actually does exist.
         let path = path::Path::new(dir).join(name);
@@ -406,6 +446,7 @@ where
         MetadataHandle::new_from_file(path_str)
     }
 
+    /// new_from_file creates a MetadataHandle from a filename.
     fn new_from_file(filename: &str) -> Result<MetadataHandle<T>> {
         // Create a handle from the input filename.
         let handle = FileHandle::new(filename);
@@ -424,6 +465,7 @@ where
         Ok(result)
     }
 
+    /// flush writes out the handle's metadata to the file system.
     fn flush(&mut self) -> Result<()> {
         self.handle
             .write(vault_serde::serialize(&self.meta)?.as_bytes())
@@ -431,6 +473,7 @@ where
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
+/// VaultMeta is the serialized metadata that corresponds to a vault instance.
 struct VaultMeta {
     experiments: Vec<Experiment>,
     // TODO (rohany): Include a version here?
@@ -448,14 +491,6 @@ impl VaultMeta {
             Some(_) => true,
             None => false,
         }
-    }
-}
-
-/// wrap_io_error unwraps an io::Result into a vault::Result.
-fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
-    match r {
-        Ok(v) => Ok(v),
-        Err(e) => Err(VaultError::IOError(e)),
     }
 }
 
@@ -490,6 +525,19 @@ pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
         cmd => panic!("unhandled command {:?}", cmd),
     };
     command.execute()
+}
+
+/// util contains different utility methods.
+mod util {
+    use crate::vault::{Result, VaultError};
+    use std::io;
+    /// wrap_io_error unwraps an io::Result into a vault::Result.
+    pub fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
+        match r {
+            Ok(v) => Ok(v),
+            Err(e) => Err(VaultError::IOError(e)),
+        }
+    }
 }
 
 /// vault_serde contains utility serialization and deserialization routines.
@@ -538,6 +586,7 @@ mod vault_serde {
     }
 }
 
+#[cfg(test)]
 mod testutils {
     use std::fs;
     use std::io::Read;
