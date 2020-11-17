@@ -1,7 +1,13 @@
 use structopt::StructOpt;
 
-// Maybe put this into it's own module?
 #[derive(StructOpt, Debug)]
+/// Commands is an enum representing the possible command line invocations.
+/// Currently, vault supports the following commands:
+///   * vault register <experiment_name>
+///   * vault store <experiment_name> <instance_directory>
+///   * vault add-meta <instance_directory> <key> <value>
+///   * vault get-latest <experiment_mame>
+///   * vault query ...
 pub enum Commands {
     Register {
         experiment: String,

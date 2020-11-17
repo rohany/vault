@@ -494,6 +494,7 @@ impl VaultMeta {
     }
 }
 
+// TODO (rohany): This should maybe go into the cli module.
 /// dispatch_command_line takes a cli::Commands and dispatches to the
 /// corresponding vault execution code.
 pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
