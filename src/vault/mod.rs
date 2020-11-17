@@ -1,9 +1,13 @@
 use crate::cli;
+use fs_extra;
 use serde::de;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::{env, fmt, fs, io, path, result};
+use uuid;
 
+/// Result is an alias for Result<T, VaultError>. It is used for uniformity
+/// among the different vault functions.
 pub type Result<T> = result::Result<T, VaultError>;
 
 trait VaultCommmand {
@@ -16,28 +20,26 @@ pub struct Experiment {
 }
 
 #[allow(dead_code)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 struct ExperimentInstance {
     // Name of the experiment this is part of?
     name: String,
-    metas: Vec<ExperimentMeta>,
+    meta: ExperimentMetaCollection,
+    // TODO (rohany): Figure out what concrete type we'll use here.
+    timestamp: String,
+    id: uuid::Uuid,
 }
 
 // TODO (rohany): Comment this
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 struct ExperimentMetaCollection {
     metas: Vec<ExperimentMeta>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 struct ExperimentMeta {
     key: String,
     value: String,
-}
-
-#[allow(dead_code)]
-struct Entry {
-    id: String,
-    path: String,
 }
 
 struct Vault {
@@ -47,18 +49,56 @@ struct Vault {
 }
 
 impl Vault {
-    pub fn new() -> Result<Vault> {
+    fn new() -> Result<Vault> {
         let base_dir = match env::var_os("VAULT_DIR") {
             Some(dir) => dir,
             None => return Err(VaultError::UnsetInstanceDirectory),
         };
         Vault::new_from_dir(base_dir.to_str().unwrap())
     }
-    pub fn new_from_dir(instance_dir: &str) -> Result<Vault> {
+    fn new_from_dir(instance_dir: &str) -> Result<Vault> {
+        // TODO (rohany): Perform some validation on the Vault instance.
         Ok(Vault {
             base_dir: instance_dir.to_string(),
             metadata_handle: VaultMetaHandle::new(instance_dir)?,
         })
+    }
+    fn open_experiment(&mut self, experiment: &str) -> Result<ExperimentHandle> {
+        if !self.metadata_handle.meta.contains_experiment(experiment) {
+            return Err(VaultError::UnknownExperimentError(experiment.to_string()));
+        };
+        // TODO (rohany): We might want to generate UUID's or something for experiments
+        //  so that they are resilient to name changes.
+        let experiment_dir = format!("{}/{}", self.base_dir, experiment);
+        ExperimentHandle::new(experiment_dir.as_str())
+    }
+    fn register_experiment(&mut self, experiment: &str) -> Result<()> {
+        // See if this experiment exists already.
+        match self
+            .metadata_handle
+            .meta
+            .experiments
+            .iter()
+            .find(|e| e.name == experiment)
+        {
+            Some(_) => {
+                return Err(VaultError::DuplicateExperimentError(
+                    experiment.to_string().clone(),
+                ))
+            }
+            None => {
+                // Add the new experiment to the metadata.
+                self.metadata_handle.meta.experiments.push(Experiment {
+                    name: experiment.to_string(),
+                });
+                // Flush the changes.
+                self.metadata_handle.flush()?;
+            }
+        };
+        // Create a directory for this experiment in the vault.
+        let dir_name = format!("{}/{}", self.base_dir, experiment);
+        wrap_io_error(fs::create_dir(path::Path::new(&dir_name)))?;
+        Ok(())
     }
 }
 
@@ -109,48 +149,58 @@ impl VaultCommmand for RegisterExperiment {
             Some(d) => Vault::new_from_dir(d.as_str()),
             None => Vault::new(),
         }?;
-        match vault
-            .metadata_handle
-            .meta
-            .experiments
-            .iter()
-            .find(|e| e.name == self.experiment.as_str())
-        {
-            Some(_) => {
-                return Err(VaultError::DuplicateExperimentError(
-                    self.experiment.clone(),
-                ))
-            }
-            None => {
-                // Add the new experiment to the metadata.
-                vault.metadata_handle.meta.experiments.push(Experiment {
-                    name: self.experiment.to_string(),
-                });
-                // Flush the changes.
-                vault.metadata_handle.flush()?;
-            }
-        };
-        Ok(())
+        vault.register_experiment(self.experiment.as_str())
     }
 }
 
 /// StoreExperimentInstance represents a vault add command.
 struct StoreExperimentInstance {
-    #[allow(dead_code)]
+    directory: Option<String>,
     experiment: String,
-    #[allow(dead_code)]
-    directory: String,
+    instance: String,
 }
 
 impl VaultCommmand for StoreExperimentInstance {
     fn execute(&self) -> Result<()> {
-        // Find the .meta file in the vault instance directory and
-        //  validate it.
-        // Find the .experiment file in the experiment folder and validate it.
-        // Make sure that the target experiment exists.
-        // Create a new spot for this experiment data and add any metadata
-        //  needed for an individual experiment.
-        Err(VaultError::Unimplemented("store".parse().unwrap()))
+        // Open the vault.
+        // TODO (rohany): Make the new_from_dir take in an option!
+        let mut vault = match &self.directory {
+            Some(d) => Vault::new_from_dir(d.as_str()),
+            None => Vault::new(),
+        }?;
+        // Ensure that this experiment is registered in the vault.
+        if !vault
+            .metadata_handle
+            .meta
+            .contains_experiment(self.experiment.as_str())
+        {
+            return Err(VaultError::UnknownExperimentError(self.experiment.clone()));
+        };
+        // Read any metadata about the experiment.
+        // TODO (rohany): What are we going to do with the metadata though?
+        let instance = ExperimentMetaCollectionHandle::new(self.instance.as_str())?;
+
+        // Open up the experiment directory.
+        let mut experiment = vault.open_experiment(self.experiment.as_str())?;
+
+        // Copy in the target experiment.
+        let id = uuid::Uuid::new_v4();
+        experiment.store(self.instance.as_str(), &id.to_string().as_str())?;
+
+        // Write out the instance's metadata.
+        let mut instance_meta = experiment.open_instance_meta(&id)?;
+        instance_meta.meta = ExperimentInstance {
+            name: self.experiment.clone(),
+            meta: instance.meta.clone(),
+            timestamp: "TODO (rohany): fill this out".to_string(),
+            id,
+        };
+        instance_meta.flush()?;
+
+        // TODO (rohany): Update any metadata in the experiment and the vault, such as the pointer
+        //  to the most recent version of the experiment.
+
+        Ok(())
     }
 }
 
@@ -178,14 +228,20 @@ pub struct Meta {
 }
 
 // TODO (rohany): Comment this.
+// TODO (rohany): We need to start condensing these errors. Look at existing error types
+//  for inspiration.
 #[derive(Debug)]
 pub enum VaultError {
     DuplicateExperimentError(String),
+    UnknownExperimentError(String),
     UnsetInstanceDirectory,
+    InvalidDirectory(String),
     #[allow(dead_code)]
     InvalidInstanceDirectory(String),
     Unimplemented(String),
+    // It is unfortunate to have both of the below.
     IOError(io::Error),
+    IOStringError(String),
     SerializationError(String),
 }
 
@@ -193,9 +249,12 @@ impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VaultError::DuplicateExperimentError(s) => write!(f, "experiment {} already exists", s),
+            VaultError::UnknownExperimentError(s) => write!(f, "unknown experiment {}", s),
             VaultError::Unimplemented(s) => write!(f, "unimplemented command: {:?}", s),
             VaultError::IOError(e) => write!(f, "IO error: {}", e),
+            VaultError::IOStringError(s) => write!(f, "IO error: {}", s),
             VaultError::SerializationError(s) => write!(f, "Serialization error: {}", s),
+            VaultError::InvalidDirectory(s) => write!(f, "{} is not a valid directory", s),
             VaultError::InvalidInstanceDirectory(_) => write!(f, "ROHANY WRITE A MESSAGE HERE"),
             VaultError::UnsetInstanceDirectory => {
                 write!(f, "please set VAULT_DIR in your environment")
@@ -204,6 +263,62 @@ impl fmt::Display for VaultError {
     }
 }
 
+// TODO (rohany): Comment this.
+struct ExperimentHandle {
+    directory: String,
+}
+
+impl ExperimentHandle {
+    fn new(directory: &str) -> Result<ExperimentHandle> {
+        match path::Path::new(directory).is_dir() {
+            true => Ok(ExperimentHandle {
+                directory: directory.to_string(),
+            }),
+            false => Err(VaultError::InvalidDirectory(directory.to_string())),
+        }
+    }
+
+    fn store(&mut self, target: &str, name: &str) -> Result<()> {
+        // Create options for the copy.
+        let mut options = fs_extra::dir::CopyOptions::new();
+        // copy_inside allows us to copy the directory into a new name.
+        options.copy_inside = true;
+        let destination = format!("{}/{}", &self.directory, name);
+        match fs_extra::dir::copy(target, destination, &options) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(VaultError::IOStringError(e.to_string())),
+        }
+    }
+
+    fn open_instance_meta(&mut self, id: &uuid::Uuid) -> Result<ExperimentInstanceHandle> {
+        // TODO (rohany): All of these key construction routines should become functions.
+        let dir = format!("{}/{}", &self.directory, id.to_string());
+        ExperimentInstanceHandle::new(dir.as_str())
+    }
+
+    fn iter_instances(&mut self) -> Result<InstanceIterator> {
+        let dirs = wrap_io_error(fs::read_dir(&self.directory))?;
+        Ok(InstanceIterator { dirs })
+    }
+}
+
+struct InstanceIterator {
+    dirs: fs::ReadDir,
+}
+
+impl Iterator for InstanceIterator {
+    type Item = Result<ExperimentInstanceHandle>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.dirs.next() {
+            None => None,
+            Some(Err(e)) => Some(Err(VaultError::IOError(e))),
+            Some(Ok(dir)) => Some(ExperimentInstanceHandle::new(dir.path().to_str().unwrap())),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct FileHandle {
     filename: String,
 }
@@ -245,13 +360,22 @@ impl FileHandle {
     }
 }
 
+type ExperimentInstanceHandle = MetadataHandle<ExperimentInstance>;
 type ExperimentMetaCollectionHandle = MetadataHandle<ExperimentMetaCollection>;
 type VaultMetaHandle = MetadataHandle<VaultMeta>;
 
 // TODO (rohany): Comment this.
+#[derive(Debug)]
 struct MetadataHandle<T> {
     handle: FileHandle,
     meta: T,
+}
+
+impl ExperimentInstanceHandle {
+    fn new(dir: &str) -> Result<ExperimentInstanceHandle> {
+        // TODO (rohany): Make this a constant.
+        MetadataHandle::new_from_dir(dir, ".instancemeta")
+    }
 }
 
 impl ExperimentMetaCollectionHandle {
@@ -310,6 +434,21 @@ where
 struct VaultMeta {
     experiments: Vec<Experiment>,
     // TODO (rohany): Include a version here?
+    // TODO (rohany): Include a "modified" timestamp here.
+}
+
+impl VaultMeta {
+    /// contains_experiment returns whether a given experiment is registered in this meta.
+    fn contains_experiment(&self, experiment: &str) -> bool {
+        match self
+            .experiments
+            .iter()
+            .find(|e| e.name.as_str() == experiment)
+        {
+            Some(_) => true,
+            None => false,
+        }
+    }
 }
 
 /// wrap_io_error unwraps an io::Result into a vault::Result.
@@ -341,10 +480,11 @@ pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
         }),
         cli::Commands::Store {
             experiment,
-            directory,
+            instance,
         } => Box::new(StoreExperimentInstance {
+            directory: None,
             experiment,
-            directory,
+            instance,
         }),
         cli::Commands::GetLatest { experiment } => Box::new(GetLatestInstance { experiment }),
         cmd => panic!("unhandled command {:?}", cmd),
@@ -395,6 +535,18 @@ mod vault_serde {
             Ok(v) => Ok(v),
             Err(e) => Err(VaultError::SerializationError(e.to_string())),
         }
+    }
+}
+
+mod testutils {
+    use std::fs;
+    use std::io::Read;
+
+    pub fn assert_file_contents(f: fs::File, expected: &str) {
+        let mut f = f;
+        let mut contents = String::new();
+        f.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, expected);
     }
 }
 
@@ -488,9 +640,7 @@ mod add_meta {
 
 #[cfg(test)]
 mod register {
-    use crate::vault::{
-        Experiment, RegisterExperiment, VaultCommmand, VaultError, VaultMetaHandle,
-    };
+    use crate::vault::{RegisterExperiment, VaultCommmand, VaultError, VaultMetaHandle};
 
     // Tests for the register command driver.
     #[test]
@@ -505,14 +655,8 @@ mod register {
         .unwrap();
 
         // We should find this experiment registered.
-        // TODO (rohany): Refactor this to a contains API, rather than inspecting the implementation.
         let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert_eq!(
-            handle.meta.experiments,
-            vec![Experiment {
-                name: "exp1".to_string()
-            }]
-        );
+        assert!(handle.meta.contains_experiment("exp1"));
 
         // Add another experiment, and expect to find it.
         let _ = RegisterExperiment {
@@ -523,17 +667,8 @@ mod register {
         .unwrap();
 
         let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert_eq!(
-            handle.meta.experiments,
-            vec![
-                Experiment {
-                    name: "exp1".to_string()
-                },
-                Experiment {
-                    name: "exp2".to_string()
-                }
-            ]
-        );
+        assert!(handle.meta.contains_experiment("exp1"));
+        assert!(handle.meta.contains_experiment("exp2"));
     }
 
     #[test]
@@ -557,5 +692,114 @@ mod register {
             Err(VaultError::DuplicateExperimentError(_)) => {}
             Err(e) => panic!("Unexpected error: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod store {
+    use crate::vault::testutils::assert_file_contents;
+    use crate::vault::{
+        AddExperimentMeta, RegisterExperiment, StoreExperimentInstance, Vault, VaultCommmand,
+        VaultError,
+    };
+    use std::fs;
+    use std::io::Write;
+
+    #[test]
+    fn basic() {
+        // Create the vault directory.
+        let dir = tempdir::TempDir::new("vault").unwrap();
+        let vault_path = dir.path().to_str().unwrap().to_string();
+
+        // We should get an error if we attempt to store into an experiment
+        // that doesn't exist yet.
+        let res = StoreExperimentInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "fake".to_string(),
+            instance: "fake".to_string(),
+        }
+        .execute();
+        // TODO (rohany): Make a "require error wrapper".
+        match res {
+            Ok(_) => panic!("Expected error, found success!"),
+            Err(VaultError::UnknownExperimentError(_)) => {}
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+
+        // Register an experiment.
+        RegisterExperiment {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+        }
+        .execute()
+        .unwrap();
+
+        // Create an experiment directory.
+        let dir = tempdir::TempDir::new("experiment").unwrap();
+        let exp_path = dir.path().to_str().unwrap().to_string();
+
+        // Add some data into the experiment.
+        let mut f = fs::File::create(format!("{}/a", &exp_path)).unwrap();
+        f.write("hello".as_bytes()).unwrap();
+        // Add a directory with another file.
+        fs::DirBuilder::new()
+            .create(format!("{}/dir", &exp_path))
+            .unwrap();
+        // Add another file into the directory.
+        let mut f = fs::File::create(format!("{}/dir/b", &exp_path)).unwrap();
+        f.write("hello2".as_bytes()).unwrap();
+
+        // Add some meta-data to this experiment directory.
+        AddExperimentMeta {
+            directory: exp_path.clone(),
+            key: "key".to_string(),
+            value: "value".to_string(),
+        }
+        .execute()
+        .unwrap();
+
+        // Finally, store this experiment into the vault.
+        StoreExperimentInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+            instance: exp_path.clone(),
+        }
+        .execute()
+        .unwrap();
+
+        // Start to verify that the experiment structure is as expected.
+        let mut vault = Vault::new_from_dir(vault_path.as_str()).unwrap();
+        let mut experiment = vault.open_experiment("exp").unwrap();
+        let mut instances = experiment.iter_instances().unwrap();
+        let instance = instances.next().unwrap().unwrap();
+        // There should only be one instance, so another call to next must fail.
+        match instances.next() {
+            None => {}
+            Some(_) => panic!("expected None, found Some"),
+        };
+        // The instance should have the key-value that we want.
+        assert_eq!(instance.meta.name, "exp");
+        assert_eq!(
+            instance
+                .meta
+                .meta
+                .metas
+                .iter()
+                .find(|m| m.key == "key")
+                .unwrap()
+                .value,
+            "value"
+        );
+        // We should find the files that placed in the experiment.
+        let path = format!("{}/{}/a", experiment.directory, &instance.meta.id);
+        assert_file_contents(fs::File::open(path).unwrap(), "hello");
+        let path = format!("{}/{}/dir/b", experiment.directory, &instance.meta.id);
+        assert_file_contents(fs::File::open(path).unwrap(), "hello2");
+
+        // The original experiment directory should not have been altered.
+        let path = format!("{}/a", &exp_path);
+        assert_file_contents(fs::File::open(path).unwrap(), "hello");
+        let path = format!("{}/dir/b", &exp_path);
+        assert_file_contents(fs::File::open(path).unwrap(), "hello2");
     }
 }

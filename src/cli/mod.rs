@@ -8,7 +8,7 @@ pub enum Commands {
     },
     Store {
         experiment: String,
-        directory: String,
+        instance: String,
     },
     // This could be a bigger "meta" command that people can use to adjust the meta
     // on their experiment.
