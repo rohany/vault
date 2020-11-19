@@ -12,15 +12,22 @@ pub type Result<T> = result::Result<T, VaultError>;
 
 /// VaultCommand is a common trait that command drivers will implement.
 trait VaultCommmand {
+    // TODO (rohany): This needs to be parameterized by a trait object that just implements
+    //  a "display" trait, so that we can eventually print out the results to stdout, but also
+    //  verify that the results are as we expect.
     fn execute(&self) -> Result<()>;
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct Experiment {
-    pub name: String, // Maybe this has a pointer to the latest version of an experiment?
+/// Experiment is a struct corresponding to data about a registered experiment.
+struct Experiment {
+    /// name is the name of the experiment.
+    name: String,
+    /// latest_instance_id is the instance of the most recent stored instance
+    /// of the experiment, if one exists.
+    latest_instance_id: Option<uuid::Uuid>,
 }
 
-#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Debug, Default)]
 /// ExperimentInstance is a struct that represents metadata about a particular
 /// instance of an experiment.
@@ -81,15 +88,28 @@ impl Vault {
         })
     }
 
-    /// open_experiment opens a handle to a target experiment.
-    fn open_experiment(&mut self, experiment: &str) -> Result<ExperimentHandle> {
-        if !self.metadata_handle.meta.contains_experiment(experiment) {
-            return Err(VaultError::UnknownExperimentError(experiment.to_string()));
+    /// open_experiment opens a mutable handle to a target experiment.
+    fn open_experiment(
+        &mut self,
+        experiment_name: &str,
+    ) -> Result<(&mut Experiment, ExperimentHandle)> {
+        let experiment = match self
+            .metadata_handle
+            .meta
+            .get_experiment_mut(experiment_name)
+        {
+            None => {
+                return Err(VaultError::UnknownExperimentError(
+                    experiment_name.to_string(),
+                ))
+            }
+            Some(e) => e,
         };
         // TODO (rohany): We might want to generate UUID's or something for experiments
         //  so that they are resilient to name changes.
-        let experiment_dir = format!("{}/{}", self.base_dir, experiment);
-        ExperimentHandle::new(experiment_dir.as_str())
+        let experiment_dir = format!("{}/{}", self.base_dir, experiment_name);
+        let handle = ExperimentHandle::new(experiment_dir.as_str())?;
+        Ok((experiment, handle))
     }
 
     /// register_experiment registers a new experiment in the vault.
@@ -111,6 +131,7 @@ impl Vault {
                 // Add the new experiment to the metadata.
                 self.metadata_handle.meta.experiments.push(Experiment {
                     name: experiment.to_string(),
+                    latest_instance_id: None,
                 });
                 // Flush the changes.
                 self.metadata_handle.flush()?;
@@ -199,18 +220,18 @@ impl VaultCommmand for StoreExperimentInstance {
             return Err(VaultError::UnknownExperimentError(self.experiment.clone()));
         };
         // Read any metadata about the experiment.
-        // TODO (rohany): What are we going to do with the metadata though?
         let instance = ExperimentMetaCollectionHandle::new(self.instance.as_str())?;
 
         // Open up the experiment directory.
-        let mut experiment = vault.open_experiment(self.experiment.as_str())?;
+        let (mut experiment, mut experiment_handle) =
+            vault.open_experiment(self.experiment.as_str())?;
 
         // Copy in the target experiment.
         let id = uuid::Uuid::new_v4();
-        experiment.store(self.instance.as_str(), &id.to_string().as_str())?;
+        experiment_handle.store(self.instance.as_str(), &id.to_string().as_str())?;
 
         // Write out the instance's metadata.
-        let mut instance_meta = experiment.open_instance_meta(&id)?;
+        let mut instance_meta = experiment_handle.open_instance_meta(&id)?;
         instance_meta.meta = ExperimentInstance {
             name: self.experiment.clone(),
             meta: instance.meta.clone(),
@@ -219,8 +240,9 @@ impl VaultCommmand for StoreExperimentInstance {
         };
         instance_meta.flush()?;
 
-        // TODO (rohany): Update any metadata in the experiment and the vault, such as the pointer
-        //  to the most recent version of the experiment.
+        // Update the pointer to the latest instance for this experiment.
+        experiment.latest_instance_id = Some(id);
+        vault.metadata_handle.flush()?;
 
         Ok(())
     }
@@ -228,25 +250,47 @@ impl VaultCommmand for StoreExperimentInstance {
 
 /// GetLatestInstance represents a vault get-latest command.
 struct GetLatestInstance {
-    #[allow(dead_code)]
+    directory: Option<String>,
     experiment: String,
 }
 
 impl VaultCommmand for GetLatestInstance {
     fn execute(&self) -> Result<()> {
         // In an ideal world, we should reduce this to a call of Query.
-        Err(VaultError::Unimplemented("get-latest".parse().unwrap()))
+
+        // Open the vault.
+        let mut vault = match &self.directory {
+            Some(d) => Vault::new_from_dir(d.as_str()),
+            None => Vault::new(),
+        }?;
+
+        // Open up the target experiment.
+        let (experiment, handle) = vault.open_experiment(self.experiment.as_str())?;
+
+        let id = match experiment.latest_instance_id {
+            None => {
+                // TODO (rohany): We'll want to do something else here.
+                println!("No instances recorded for this experiment!");
+                return Ok(());
+            }
+            Some(id) => id,
+        };
+
+        let path = format!("{}/{}", handle.directory, id.to_string());
+        println!("path: {}", path);
+
+        Ok(())
     }
 }
 
 // Meta contains information that is serialized into the base directory of a
 // Vault instance.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Meta {
+struct Meta {
     /// categories is a list of registered experiments.
-    pub categories: Vec<Experiment>,
+    categories: Vec<Experiment>,
     // Is there a higher level version object we can use here?
-    pub version: String,
+    version: String,
 }
 
 // TODO (rohany): Comment this.
@@ -260,6 +304,7 @@ pub enum VaultError {
     InvalidDirectory(String),
     #[allow(dead_code)]
     InvalidInstanceDirectory(String),
+    #[allow(dead_code)]
     Unimplemented(String),
     // It is unfortunate to have both of the below.
     IOError(io::Error),
@@ -483,14 +528,24 @@ struct VaultMeta {
 impl VaultMeta {
     /// contains_experiment returns whether a given experiment is registered in this meta.
     fn contains_experiment(&self, experiment: &str) -> bool {
-        match self
-            .experiments
-            .iter()
-            .find(|e| e.name.as_str() == experiment)
-        {
+        match self.get_experiment(experiment) {
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// get_experiment returns a reference to an experiment's metadata from the vault.
+    fn get_experiment(&self, experiment: &str) -> Option<&Experiment> {
+        self.experiments
+            .iter()
+            .find(|e| e.name.as_str() == experiment)
+    }
+
+    /// get_experiment_mut returns a mutable reference to an experiment's metadata from the vault.
+    fn get_experiment_mut(&mut self, experiment: &str) -> Option<&mut Experiment> {
+        self.experiments
+            .iter_mut()
+            .find(|e| e.name.as_str() == experiment)
     }
 }
 
@@ -522,7 +577,10 @@ pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
             experiment,
             instance,
         }),
-        cli::Commands::GetLatest { experiment } => Box::new(GetLatestInstance { experiment }),
+        cli::Commands::GetLatest { experiment } => Box::new(GetLatestInstance {
+            directory: None,
+            experiment,
+        }),
         cmd => panic!("unhandled command {:?}", cmd),
     };
     command.execute()
@@ -819,7 +877,7 @@ mod store {
 
         // Start to verify that the experiment structure is as expected.
         let mut vault = Vault::new_from_dir(vault_path.as_str()).unwrap();
-        let mut experiment = vault.open_experiment("exp").unwrap();
+        let (_, mut experiment) = vault.open_experiment("exp").unwrap();
         let mut instances = experiment.iter_instances().unwrap();
         let instance = instances.next().unwrap().unwrap();
         // There should only be one instance, so another call to next must fail.
@@ -851,5 +909,67 @@ mod store {
         assert_file_contents(fs::File::open(path).unwrap(), "hello");
         let path = format!("{}/dir/b", &exp_path);
         assert_file_contents(fs::File::open(path).unwrap(), "hello2");
+    }
+}
+
+#[cfg(test)]
+mod get_latest {
+    use crate::vault::{
+        GetLatestInstance, RegisterExperiment, StoreExperimentInstance, VaultCommmand, VaultError,
+    };
+
+    #[test]
+    fn basic() {
+        // Create the vault directory.
+        let dir = tempdir::TempDir::new("vault").unwrap();
+        let vault_path = dir.path().to_str().unwrap().to_string();
+        // Create an experiment directory.
+        let dir = tempdir::TempDir::new("vault").unwrap();
+        let exp_path = dir.path().to_str().unwrap().to_string();
+
+        // Register an experiment.
+        RegisterExperiment {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+        }
+        .execute()
+        .unwrap();
+
+        // Getting the latest from an invalid experiment should error.
+        let res = GetLatestInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "ex".to_string(),
+        }
+        .execute();
+        match res {
+            Ok(_) => panic!("Expected error, found success!"),
+            Err(VaultError::UnknownExperimentError(_)) => {}
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+
+        // Getting the latest from an experiment with no instances should be empty.
+        GetLatestInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+        }
+        .execute()
+        .unwrap();
+
+        // Now store an experiment instance.
+        StoreExperimentInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+            instance: exp_path.clone(),
+        }
+        .execute()
+        .unwrap();
+
+        // Getting the latest instance should "work" now.
+        GetLatestInstance {
+            directory: Some(vault_path.clone()),
+            experiment: "exp".to_string(),
+        }
+        .execute()
+        .unwrap();
     }
 }
