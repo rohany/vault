@@ -747,63 +747,6 @@ mod add_meta {
 }
 
 #[cfg(test)]
-mod register {
-    use crate::vault::{RegisterExperiment, VaultCommmand, VaultError, VaultMetaHandle};
-
-    // Tests for the register command driver.
-    #[test]
-    fn basic() {
-        let dir = tempdir::TempDir::new("register").unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        let _ = RegisterExperiment {
-            directory: Some(path.clone()),
-            experiment: "exp1".to_string(),
-        }
-        .execute()
-        .unwrap();
-
-        // We should find this experiment registered.
-        let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert!(handle.meta.contains_experiment("exp1"));
-
-        // Add another experiment, and expect to find it.
-        let _ = RegisterExperiment {
-            directory: Some(path.clone()),
-            experiment: "exp2".to_string(),
-        }
-        .execute()
-        .unwrap();
-
-        let handle = VaultMetaHandle::new(path.as_str()).unwrap();
-        assert!(handle.meta.contains_experiment("exp1"));
-        assert!(handle.meta.contains_experiment("exp2"));
-    }
-
-    #[test]
-    fn no_duplicate_experiments() {
-        let dir = tempdir::TempDir::new("register").unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        let _ = RegisterExperiment {
-            directory: Some(path.clone()),
-            experiment: "exp".to_string(),
-        }
-        .execute()
-        .unwrap();
-        // We should get an error attempting to register the same experiment twice.
-        let res = RegisterExperiment {
-            directory: Some(path.clone()),
-            experiment: "exp".to_string(),
-        }
-        .execute();
-        match res {
-            Ok(_) => panic!("Expected error, found success!"),
-            Err(VaultError::DuplicateExperimentError(_)) => {}
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
-    }
-}
-
-#[cfg(test)]
 mod store {
     use crate::vault::testutils::assert_file_contents;
     use crate::vault::{
@@ -971,5 +914,55 @@ mod get_latest {
         }
         .execute()
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod datadriven_tests {
+    use super::*;
+    use datadriven::walk;
+    use std::collections::HashMap;
+
+    fn result_to_string(r: Result<()>) -> String {
+        match r {
+            Ok(_) => "".to_string(),
+            Err(e) => format!("Error: {}\n", e.to_string()),
+        }
+    }
+
+    #[test]
+    fn run() {
+        walk("test/testdata/vault/commands", |f| {
+            // TODO (rohany): Comment this.
+            let mut active_dirs = vec![];
+            let mut vault_path = None;
+            let mut experiment_dirs = HashMap::new();
+            f.run(|test_case| -> String {
+                match test_case.directive.as_str() {
+                    "new-vault" => {
+                        let dir = tempdir::TempDir::new("vault").unwrap();
+                        vault_path = Some(dir.path().to_str().unwrap().to_string());
+                        active_dirs.push(dir);
+                        "".to_string()
+                    }
+                    "new-experiment" => {
+                        let dir = tempdir::TempDir::new("experiment").unwrap();
+                        let path = dir.path().to_str().unwrap().to_string();
+                        let name = test_case.args["name"][0].clone();
+                        experiment_dirs.insert(name, path);
+                        active_dirs.push(dir);
+                        "".to_string()
+                    }
+                    "register-experiment" => result_to_string(
+                        RegisterExperiment {
+                            directory: Some(vault_path.as_ref().unwrap().clone()),
+                            experiment: test_case.args["name"][0].clone(),
+                        }
+                        .execute(),
+                    ),
+                    _ => panic!("unhandled directive: {}", test_case.directive),
+                }
+            })
+        })
     }
 }

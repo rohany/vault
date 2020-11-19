@@ -1,0 +1,18 @@
+# DataDriven test.
+
+new-vault
+----
+
+register-experiment name=exp
+----
+
+register-experiment name=exp
+----
+Error: experiment exp already exists
+
+register-experiment name=exp2
+----
+
+register-experiment name=exp2
+----
+Error: experiment exp2 already exists
