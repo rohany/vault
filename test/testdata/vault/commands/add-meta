@@ -1,0 +1,10 @@
+new-instance name=i
+----
+
+add-meta instance=i key=k value=v
+----
+
+add-meta instance=i key=k2 value=v2
+----
+
+# TODO (rohany): We need a "list-meta" command to verify this.

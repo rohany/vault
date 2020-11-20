@@ -934,9 +934,13 @@ mod datadriven_tests {
     fn run() {
         walk("test/testdata/vault/commands", |f| {
             // TODO (rohany): Comment this.
+            // In order to avoid temporary directories from being cleaned up
+            // when their references go out of scope, we collect them all so that
+            // they can be dropped at the end of the test.
             let mut active_dirs = vec![];
             let mut vault_path = None;
             let mut experiment_dirs = HashMap::new();
+            let mut instances = HashMap::new();
             f.run(|test_case| -> String {
                 match test_case.directive.as_str() {
                     "new-vault" => {
@@ -952,6 +956,29 @@ mod datadriven_tests {
                         experiment_dirs.insert(name, path);
                         active_dirs.push(dir);
                         "".to_string()
+                    }
+                    "new-instance" => {
+                        let dir = tempdir::TempDir::new("experiment").unwrap();
+                        let path = dir.path().to_str().unwrap().to_string();
+                        let name = test_case.args["name"][0].clone();
+                        instances.insert(name, path);
+                        active_dirs.push(dir);
+                        "".to_string()
+                    }
+                    "add-meta" => {
+                        let instance = instances
+                            .get(test_case.args["instance"][0].as_str())
+                            .unwrap();
+                        let key = test_case.args["key"][0].clone();
+                        let value = test_case.args["value"][0].clone();
+                        result_to_string(
+                            AddExperimentMeta {
+                                directory: instance.clone(),
+                                key,
+                                value,
+                            }
+                            .execute(),
+                        )
                     }
                     "register-experiment" => result_to_string(
                         RegisterExperiment {
