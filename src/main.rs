@@ -30,7 +30,7 @@ use structopt::StructOpt;
 fn main() {
     let args = cli::Commands::from_args();
     match vault::dispatch_command_line(args) {
-        Ok(..) => {}
+        Ok(f) => println!("{}", f.to_string()),
         Err(e) => println!("Error: {}", e),
     }
 }

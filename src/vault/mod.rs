@@ -1,6 +1,7 @@
 use crate::cli;
 use fs_extra;
 use serde::de;
+use serde::export::Formatter;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::{env, fmt, fs, io, path, result};
@@ -10,12 +11,27 @@ use uuid;
 /// among the different vault functions.
 pub type Result<T> = result::Result<T, VaultError>;
 
+/// CommandResult is the type that is returned from execution of a VaultCommand.
+type CommandResult = Result<Box<dyn fmt::Display>>;
+
 /// VaultCommand is a common trait that command drivers will implement.
 trait VaultCommmand {
-    // TODO (rohany): This needs to be parameterized by a trait object that just implements
-    //  a "display" trait, so that we can eventually print out the results to stdout, but also
-    //  verify that the results are as we expect.
-    fn execute(&self) -> Result<()>;
+    /// execute is the driver method for a VaultCommand. It returns an object
+    /// that can be Displayed to stdout, or inspected for testing.
+    fn execute(&self) -> CommandResult;
+}
+
+/// VaultUnit is used to return nothing from a vault command.
+struct VaultUnit {}
+impl VaultUnit {
+    fn new() -> CommandResult {
+        Ok(Box::new(VaultUnit {}))
+    }
+}
+impl fmt::Display for VaultUnit {
+    fn fmt(&self, _: &mut Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -155,7 +171,7 @@ struct AddExperimentMeta {
 }
 
 impl VaultCommmand for AddExperimentMeta {
-    fn execute(&self) -> Result<()> {
+    fn execute(&self) -> CommandResult {
         // Get a handle on the experiment's metadata.
         let mut handle = ExperimentMetaCollectionHandle::new(self.directory.as_str())?;
         // See if this key exists already.
@@ -175,7 +191,7 @@ impl VaultCommmand for AddExperimentMeta {
             }),
         }
         handle.flush()?;
-        Ok(())
+        VaultUnit::new()
     }
 }
 
@@ -186,13 +202,14 @@ struct RegisterExperiment {
 }
 
 impl VaultCommmand for RegisterExperiment {
-    fn execute(&self) -> Result<()> {
+    fn execute(&self) -> CommandResult {
         // Open the vault.
         let mut vault = match &self.directory {
             Some(d) => Vault::new_from_dir(d.as_str()),
             None => Vault::new(),
         }?;
-        vault.register_experiment(self.experiment.as_str())
+        vault.register_experiment(self.experiment.as_str())?;
+        VaultUnit::new()
     }
 }
 
@@ -204,7 +221,7 @@ struct StoreExperimentInstance {
 }
 
 impl VaultCommmand for StoreExperimentInstance {
-    fn execute(&self) -> Result<()> {
+    fn execute(&self) -> CommandResult {
         // Open the vault.
         // TODO (rohany): Make the new_from_dir take in an option!
         let mut vault = match &self.directory {
@@ -244,7 +261,7 @@ impl VaultCommmand for StoreExperimentInstance {
         experiment.latest_instance_id = Some(id);
         vault.metadata_handle.flush()?;
 
-        Ok(())
+        VaultUnit::new()
     }
 }
 
@@ -254,8 +271,27 @@ struct GetLatestInstance {
     experiment: String,
 }
 
+/// GetLatestInstanceResult is the output of a GetLatestInstance command.
+struct GetLatestInstanceResult {
+    directory: Option<String>,
+}
+impl GetLatestInstanceResult {
+    fn new(directory: Option<String>) -> CommandResult {
+        Ok(Box::new(GetLatestInstanceResult { directory }))
+    }
+}
+
+impl fmt::Display for GetLatestInstanceResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.directory.as_ref() {
+            Some(d) => write!(f, "{}", d),
+            None => write!(f, "No stored instances!"),
+        }
+    }
+}
+
 impl VaultCommmand for GetLatestInstance {
-    fn execute(&self) -> Result<()> {
+    fn execute(&self) -> CommandResult {
         // In an ideal world, we should reduce this to a call of Query.
 
         // Open the vault.
@@ -268,18 +304,12 @@ impl VaultCommmand for GetLatestInstance {
         let (experiment, handle) = vault.open_experiment(self.experiment.as_str())?;
 
         let id = match experiment.latest_instance_id {
-            None => {
-                // TODO (rohany): We'll want to do something else here.
-                println!("No instances recorded for this experiment!");
-                return Ok(());
-            }
+            None => return GetLatestInstanceResult::new(None),
             Some(id) => id,
         };
 
         let path = format!("{}/{}", handle.directory, id.to_string());
-        println!("path: {}", path);
-
-        Ok(())
+        GetLatestInstanceResult::new(Some(path))
     }
 }
 
@@ -552,7 +582,7 @@ impl VaultMeta {
 // TODO (rohany): This should maybe go into the cli module.
 /// dispatch_command_line takes a cli::Commands and dispatches to the
 /// corresponding vault execution code.
-pub fn dispatch_command_line(args: cli::Commands) -> Result<()> {
+pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
     // We could not do an allocation here and instead just call the trait
     // method in each of the cases, but I wanted to play around with traits.
     let command: Box<dyn VaultCommmand> = match args {
@@ -878,18 +908,6 @@ mod get_latest {
         .execute()
         .unwrap();
 
-        // Getting the latest from an invalid experiment should error.
-        let res = GetLatestInstance {
-            directory: Some(vault_path.clone()),
-            experiment: "ex".to_string(),
-        }
-        .execute();
-        match res {
-            Ok(_) => panic!("Expected error, found success!"),
-            Err(VaultError::UnknownExperimentError(_)) => {}
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
-
         // Getting the latest from an experiment with no instances should be empty.
         GetLatestInstance {
             directory: Some(vault_path.clone()),
@@ -923,9 +941,12 @@ mod datadriven_tests {
     use datadriven::walk;
     use std::collections::HashMap;
 
-    fn result_to_string(r: Result<()>) -> String {
+    fn result_to_string(r: CommandResult) -> String {
         match r {
-            Ok(_) => "".to_string(),
+            Ok(f) => match f.to_string().as_str() {
+                "" => "".to_string(),
+                s => format!("{}\n", s),
+            },
             Err(e) => format!("Error: {}\n", e.to_string()),
         }
     }
@@ -939,21 +960,12 @@ mod datadriven_tests {
             // they can be dropped at the end of the test.
             let mut active_dirs = vec![];
             let mut vault_path = None;
-            let mut experiment_dirs = HashMap::new();
             let mut instances = HashMap::new();
             f.run(|test_case| -> String {
                 match test_case.directive.as_str() {
                     "new-vault" => {
                         let dir = tempdir::TempDir::new("vault").unwrap();
                         vault_path = Some(dir.path().to_str().unwrap().to_string());
-                        active_dirs.push(dir);
-                        "".to_string()
-                    }
-                    "new-experiment" => {
-                        let dir = tempdir::TempDir::new("experiment").unwrap();
-                        let path = dir.path().to_str().unwrap().to_string();
-                        let name = test_case.args["name"][0].clone();
-                        experiment_dirs.insert(name, path);
                         active_dirs.push(dir);
                         "".to_string()
                     }
@@ -976,6 +988,18 @@ mod datadriven_tests {
                                 directory: instance.clone(),
                                 key,
                                 value,
+                            }
+                            .execute(),
+                        )
+                    }
+                    "get-latest" => {
+                        let experiment = test_case.args["experiment"][0].clone();
+                        // TODO (rohany): This will need to be updated to strip away the "temp"
+                        //  prefix of the returned directory.
+                        result_to_string(
+                            GetLatestInstance {
+                                directory: Some(vault_path.as_ref().unwrap().clone()),
+                                experiment,
                             }
                             .execute(),
                         )

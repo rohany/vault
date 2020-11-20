@@ -1,0 +1,22 @@
+new-vault
+----
+
+# Getting the latest from an invalid experiment should error.
+get-latest experiment=fake
+----
+Error: unknown experiment fake
+
+# Create a new experiment.
+register-experiment name=exp
+----
+
+# We should get "empty" back from get-latest on exp.
+get-latest experiment=exp
+----
+No stored instances!
+
+# Create a new instance.
+new-instance name=i
+----
+
+# TODO (rohany): Need a store instance command now.
