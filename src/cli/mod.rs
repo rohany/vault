@@ -6,6 +6,7 @@ use structopt::StructOpt;
 ///   * vault register <experiment_name>
 ///   * vault store <experiment_name> <instance_directory>
 ///   * vault add-meta <instance_directory> <key> <value>
+///   * vault list-meta <instance_directory>
 ///   * vault get-latest <experiment_mame>
 ///   * vault query ...
 pub enum Commands {
@@ -22,6 +23,9 @@ pub enum Commands {
         directory: String,
         key: String,
         value: String,
+    },
+    ListMeta {
+        directory: String,
     },
     GetLatest {
         experiment: String,

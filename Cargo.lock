@@ -10,6 +10,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "any_derive"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -385,6 +393,7 @@ dependencies = [
 name = "vault"
 version = "0.1.0"
 dependencies = [
+ "any_derive",
  "datadriven",
  "fs_extra",
  "serde",
