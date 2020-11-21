@@ -1,8 +1,11 @@
 use crate::cli;
+use any_derive;
 use fs_extra;
 use serde::de;
+use serde::export::fmt::Display;
 use serde::export::Formatter;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::io::Write;
 use std::{env, fmt, fs, io, path, result};
 use uuid;
@@ -12,7 +15,7 @@ use uuid;
 pub type Result<T> = result::Result<T, VaultError>;
 
 /// CommandResult is the type that is returned from execution of a VaultCommand.
-type CommandResult = Result<Box<dyn fmt::Display>>;
+type CommandResult = Result<Box<dyn VaultResult>>;
 
 /// VaultCommand is a common trait that command drivers will implement.
 trait VaultCommmand {
@@ -21,8 +24,15 @@ trait VaultCommmand {
     fn execute(&self) -> CommandResult;
 }
 
+/// VaultResult is underlying type returned from a VaultCommmand. The idea is that
+/// the resulting type is castable down to a particular implementation, and also
+/// displayable via the command line.
+pub trait VaultResult: util::AsAny + fmt::Display {}
+
+#[derive(any_derive::AsAny)]
 /// VaultUnit is used to return nothing from a vault command.
 struct VaultUnit {}
+impl VaultResult for VaultUnit {}
 impl VaultUnit {
     fn new() -> CommandResult {
         Ok(Box::new(VaultUnit {}))
@@ -195,6 +205,45 @@ impl VaultCommmand for AddExperimentMeta {
     }
 }
 
+/// ListInstanceMeta represents a vault list-meta command.
+struct ListInstanceMeta {
+    /// directory is the directory corresponding to an experiment instance.
+    directory: String,
+}
+
+#[derive(any_derive::AsAny)]
+/// ListInstanceMetaResult is the result of a list-meta command.
+struct ListInstanceMetaResult {
+    meta: ExperimentMetaCollection,
+}
+impl VaultResult for ListInstanceMetaResult {}
+impl ListInstanceMetaResult {
+    fn new(meta: ExperimentMetaCollection) -> CommandResult {
+        return Ok(Box::new(ListInstanceMetaResult { meta }));
+    }
+}
+impl fmt::Display for ListInstanceMetaResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for meta in self.meta.metas.iter() {
+            if !first {
+                write!(f, "\n")?;
+            };
+            write!(f, "key: {}, value: {}", meta.key, meta.value)?;
+            first = false;
+        }
+        Ok(())
+    }
+}
+
+impl VaultCommmand for ListInstanceMeta {
+    fn execute(&self) -> CommandResult {
+        // Get a handle on the experiment's metadata.
+        let handle = ExperimentMetaCollectionHandle::new(self.directory.as_str())?;
+        ListInstanceMetaResult::new(handle.meta)
+    }
+}
+
 /// RegisterExperiment represents a vault register command.
 struct RegisterExperiment {
     directory: Option<String>,
@@ -271,10 +320,12 @@ struct GetLatestInstance {
     experiment: String,
 }
 
+#[derive(any_derive::AsAny)]
 /// GetLatestInstanceResult is the output of a GetLatestInstance command.
 struct GetLatestInstanceResult {
     directory: Option<String>,
 }
+impl VaultResult for GetLatestInstanceResult {}
 impl GetLatestInstanceResult {
     fn new(directory: Option<String>) -> CommandResult {
         Ok(Box::new(GetLatestInstanceResult { directory }))
@@ -595,6 +646,7 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
             key,
             value,
         }),
+        cli::Commands::ListMeta { directory } => Box::new(ListInstanceMeta { directory }),
         cli::Commands::Register { experiment } => Box::new(RegisterExperiment {
             directory: None,
             experiment,
@@ -619,13 +671,20 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
 /// util contains different utility methods.
 mod util {
     use crate::vault::{Result, VaultError};
+    use std::any::Any;
     use std::io;
+
     /// wrap_io_error unwraps an io::Result into a vault::Result.
     pub fn wrap_io_error<T>(r: io::Result<T>) -> Result<T> {
         match r {
             Ok(v) => Ok(v),
             Err(e) => Err(VaultError::IOError(e)),
         }
+    }
+
+    // AsAny is a trait to cast a trait object into the dynamic Any type.
+    pub trait AsAny {
+        fn as_any(&self) -> &dyn Any;
     }
 }
 
@@ -685,94 +744,6 @@ mod testutils {
         let mut contents = String::new();
         f.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, expected);
-    }
-}
-
-#[cfg(test)]
-mod add_meta {
-    use crate::vault::{
-        AddExperimentMeta, ExperimentMeta, ExperimentMetaCollectionHandle, VaultCommmand,
-    };
-    use tempdir;
-
-    // Tests for the add-meta command driver.
-    #[test]
-    fn basic() {
-        let dir = tempdir::TempDir::new("add-meta").unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        // Add some metadata to an empty experiment.
-        let _ = AddExperimentMeta {
-            directory: path.clone(),
-            key: "key".parse().unwrap(),
-            value: "value".parse().unwrap(),
-        }
-        .execute()
-        .unwrap();
-        // We should find this data now in the metadata.
-        let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(
-            handle.meta.metas,
-            vec![ExperimentMeta {
-                key: "key".to_string(),
-                value: "value".to_string()
-            }]
-        );
-
-        // If we add another key-value then we should find it as well.
-        let _ = AddExperimentMeta {
-            directory: path.clone(),
-            key: "key2".parse().unwrap(),
-            value: "value2".parse().unwrap(),
-        }
-        .execute()
-        .unwrap();
-
-        let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(
-            handle.meta.metas,
-            vec![
-                ExperimentMeta {
-                    key: "key".to_string(),
-                    value: "value".to_string()
-                },
-                ExperimentMeta {
-                    key: "key2".to_string(),
-                    value: "value2".to_string()
-                },
-            ]
-        )
-    }
-
-    #[test]
-    fn no_duplicates() {
-        let dir = tempdir::TempDir::new("add-meta").unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        // Add some metadata to an empty experiment.
-        let _ = AddExperimentMeta {
-            directory: path.clone(),
-            key: "key".parse().unwrap(),
-            value: "value".parse().unwrap(),
-        }
-        .execute()
-        .unwrap();
-        // Adding the same value again shouldn't result an an error and should
-        // overwrite the value in the experiment.
-        let _ = AddExperimentMeta {
-            directory: path.clone(),
-            key: "key".parse().unwrap(),
-            value: "value2".parse().unwrap(),
-        }
-        .execute()
-        .unwrap();
-        // We should find this data now in the metadata.
-        let handle = ExperimentMetaCollectionHandle::new(path.as_str()).unwrap();
-        assert_eq!(
-            handle.meta.metas,
-            vec![ExperimentMeta {
-                key: "key".to_string(),
-                value: "value2".to_string()
-            }]
-        );
     }
 }
 
@@ -886,60 +857,12 @@ mod store {
 }
 
 #[cfg(test)]
-mod get_latest {
-    use crate::vault::{
-        GetLatestInstance, RegisterExperiment, StoreExperimentInstance, VaultCommmand, VaultError,
-    };
-
-    #[test]
-    fn basic() {
-        // Create the vault directory.
-        let dir = tempdir::TempDir::new("vault").unwrap();
-        let vault_path = dir.path().to_str().unwrap().to_string();
-        // Create an experiment directory.
-        let dir = tempdir::TempDir::new("vault").unwrap();
-        let exp_path = dir.path().to_str().unwrap().to_string();
-
-        // Register an experiment.
-        RegisterExperiment {
-            directory: Some(vault_path.clone()),
-            experiment: "exp".to_string(),
-        }
-        .execute()
-        .unwrap();
-
-        // Getting the latest from an experiment with no instances should be empty.
-        GetLatestInstance {
-            directory: Some(vault_path.clone()),
-            experiment: "exp".to_string(),
-        }
-        .execute()
-        .unwrap();
-
-        // Now store an experiment instance.
-        StoreExperimentInstance {
-            directory: Some(vault_path.clone()),
-            experiment: "exp".to_string(),
-            instance: exp_path.clone(),
-        }
-        .execute()
-        .unwrap();
-
-        // Getting the latest instance should "work" now.
-        GetLatestInstance {
-            directory: Some(vault_path.clone()),
-            experiment: "exp".to_string(),
-        }
-        .execute()
-        .unwrap();
-    }
-}
-
-#[cfg(test)]
 mod datadriven_tests {
     use super::*;
     use datadriven::walk;
     use std::collections::HashMap;
+    use std::io::Read;
+    use std::ops::Deref;
 
     fn result_to_string(r: CommandResult) -> String {
         match r {
@@ -954,13 +877,13 @@ mod datadriven_tests {
     #[test]
     fn run() {
         walk("test/testdata/vault/commands", |f| {
-            // TODO (rohany): Comment this.
             // In order to avoid temporary directories from being cleaned up
             // when their references go out of scope, we collect them all so that
             // they can be dropped at the end of the test.
             let mut active_dirs = vec![];
             let mut vault_path = None;
             let mut instances = HashMap::new();
+            let instance_file_name = "instance_name";
             f.run(|test_case| -> String {
                 match test_case.directive.as_str() {
                     "new-vault" => {
@@ -973,7 +896,11 @@ mod datadriven_tests {
                         let dir = tempdir::TempDir::new("experiment").unwrap();
                         let path = dir.path().to_str().unwrap().to_string();
                         let name = test_case.args["name"][0].clone();
-                        instances.insert(name, path);
+                        instances.insert(name.clone(), path);
+                        // Drop a file into this directory with the name of the instance.
+                        // This will be used to identify instances later.
+                        let mut f = fs::File::create(&dir.path().join(instance_file_name)).unwrap();
+                        let _ = f.write(name.as_bytes()).unwrap();
                         active_dirs.push(dir);
                         "".to_string()
                     }
@@ -992,17 +919,52 @@ mod datadriven_tests {
                             .execute(),
                         )
                     }
-                    "get-latest" => {
-                        let experiment = test_case.args["experiment"][0].clone();
-                        // TODO (rohany): This will need to be updated to strip away the "temp"
-                        //  prefix of the returned directory.
+                    "list-meta" => {
+                        let instance = instances
+                            .get(test_case.args["instance"][0].as_str())
+                            .unwrap();
                         result_to_string(
-                            GetLatestInstance {
-                                directory: Some(vault_path.as_ref().unwrap().clone()),
-                                experiment,
+                            ListInstanceMeta {
+                                directory: instance.clone(),
                             }
                             .execute(),
                         )
+                    }
+                    "get-latest" => {
+                        let experiment = test_case.args["experiment"][0].clone();
+                        // Execute the get-latest instance command.
+                        let res = GetLatestInstance {
+                            directory: Some(vault_path.as_ref().unwrap().clone()),
+                            experiment,
+                        }
+                        .execute();
+                        // Rather than just returning the output, we have to clean up the result
+                        // so that the temporary file and instance UUID aren't on display.
+                        match res {
+                            // If an error was raised, then return that directly.
+                            Err(_) => result_to_string(res),
+                            // If a result is returned, we have to inspect it.
+                            Ok(b) => {
+                                // Downcast the result into the expected struct.
+                                let latest_result = b
+                                    .as_any()
+                                    .downcast_ref::<GetLatestInstanceResult>()
+                                    .unwrap();
+                                match &latest_result.directory {
+                                    // If there isn't a latest instance, then there's nothing to do.
+                                    None => result_to_string(Ok(b)),
+                                    Some(s) => {
+                                        // s is a path to some directory. Let's read out the name of the instance
+                                        // that this directory contains to see what instance is actually here.
+                                        let p = path::Path::new(s).join(instance_file_name);
+                                        let mut f = fs::File::open(p).unwrap();
+                                        let mut name = String::new();
+                                        let _ = f.read_to_string(&mut name).unwrap();
+                                        format!("{}\n", name)
+                                    }
+                                }
+                            }
+                        }
                     }
                     "register-experiment" => result_to_string(
                         RegisterExperiment {
@@ -1011,6 +973,19 @@ mod datadriven_tests {
                         }
                         .execute(),
                     ),
+                    "store-instance" => {
+                        let experiment = test_case.args["experiment"][0].clone();
+                        let instance_name = test_case.args["instance"][0].clone();
+                        let instance = instances.get(&instance_name).unwrap();
+                        result_to_string(
+                            StoreExperimentInstance {
+                                directory: Some(vault_path.as_ref().unwrap().clone()),
+                                experiment,
+                                instance: instance.clone(),
+                            }
+                            .execute(),
+                        )
+                    }
                     _ => panic!("unhandled directive: {}", test_case.directive),
                 }
             })

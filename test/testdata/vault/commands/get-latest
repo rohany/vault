@@ -15,8 +15,23 @@ get-latest experiment=exp
 ----
 No stored instances!
 
-# Create a new instance.
+# Create a new instance and store it.
 new-instance name=i
 ----
 
-# TODO (rohany): Need a store instance command now.
+store-instance experiment=exp instance=i
+----
+
+get-latest experiment=exp
+----
+i
+
+new-instance name=i2
+----
+
+store-instance experiment=exp instance=i2
+----
+
+get-latest experiment=exp
+----
+i2

@@ -7,4 +7,17 @@ add-meta instance=i key=k value=v
 add-meta instance=i key=k2 value=v2
 ----
 
-# TODO (rohany): We need a "list-meta" command to verify this.
+list-meta instance=i
+----
+key: k, value: v
+key: k2, value: v2
+
+# Adding meta for an existing key should overwrite it.
+
+add-meta instance=i key=k value=overwrite
+----
+
+list-meta instance=i
+----
+key: k, value: overwrite
+key: k2, value: v2
