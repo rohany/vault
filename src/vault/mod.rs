@@ -516,28 +516,30 @@ impl FileHandle {
     }
 }
 
+// Constants for metadata filenames.
+const INSTANCE_META_FILENAME: &str = ".instancemeta";
+const EXPERIMENT_META_FILENAME: &str = ".experimentmeta";
+const VAULT_META_FILENAME: &str = ".vaultmeta";
+
 // Type definitions for standard users of MetadataHandle.
 type ExperimentInstanceHandle = MetadataHandle<ExperimentInstance>;
 impl ExperimentInstanceHandle {
     fn new(dir: &str) -> Result<ExperimentInstanceHandle> {
-        // TODO (rohany): Make this a constant.
-        MetadataHandle::new_from_dir(dir, ".instancemeta")
+        MetadataHandle::new_from_dir(dir, INSTANCE_META_FILENAME)
     }
 }
 
 type ExperimentMetaCollectionHandle = MetadataHandle<ExperimentMetaCollection>;
 impl ExperimentMetaCollectionHandle {
     fn new(dir: &str) -> Result<ExperimentMetaCollectionHandle> {
-        // TODO (rohany): Make this a constant.
-        MetadataHandle::new_from_dir(dir, ".experimentmeta")
+        MetadataHandle::new_from_dir(dir, EXPERIMENT_META_FILENAME)
     }
 }
 
 type VaultMetaHandle = MetadataHandle<VaultMeta>;
 impl VaultMetaHandle {
     fn new(dir: &str) -> Result<VaultMetaHandle> {
-        // TODO (rohany): Make this a constant.
-        MetadataHandle::new_from_dir(dir, ".vaultmeta")
+        MetadataHandle::new_from_dir(dir, VAULT_META_FILENAME)
     }
 }
 
