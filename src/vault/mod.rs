@@ -16,6 +16,7 @@ mod db;
 use db::schema;
 use db::schema::{experiment, experiment_instance};
 use diesel;
+use diesel::sql_types::{Integer, Text};
 
 /// Result is an alias for Result<T, VaultError>. It is used for uniformity
 /// among the different vault functions.
@@ -334,38 +335,47 @@ impl VaultCommmand for StoreExperimentInstance {
     }
 }
 
+#[derive(any_derive::AsAny)]
+/// InstanceListResult is a result type that can be used by commands
+/// that return a list of instance directories.
+struct InstanceListResult {
+    directory: Option<Vec<String>>,
+}
+impl VaultResult for InstanceListResult {}
+impl InstanceListResult {
+    fn new(directory: Option<Vec<String>>) -> CommandResult {
+        Ok(Box::new(InstanceListResult { directory }))
+    }
+}
+impl fmt::Display for InstanceListResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.directory.as_ref() {
+            Some(d) => {
+                let mut first = true;
+                for s in d.iter() {
+                    if !first {
+                        write!(f, "\n")?;
+                    }
+                    write!(f, "{}", s)?;
+                    first = false;
+                }
+                Ok(())
+            }
+            None => write!(f, "No stored instances!"),
+        }
+    }
+}
+
 /// GetLatestInstance represents a vault get-latest command.
 struct GetLatestInstance {
     directory: Option<String>,
     experiment: String,
 }
 
-#[derive(any_derive::AsAny)]
-/// GetLatestInstanceResult is the output of a GetLatestInstance command.
-struct GetLatestInstanceResult {
-    directory: Option<String>,
-}
-impl VaultResult for GetLatestInstanceResult {}
-impl GetLatestInstanceResult {
-    fn new(directory: Option<String>) -> CommandResult {
-        Ok(Box::new(GetLatestInstanceResult { directory }))
-    }
-}
-
-impl fmt::Display for GetLatestInstanceResult {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.directory.as_ref() {
-            Some(d) => write!(f, "{}", d),
-            None => write!(f, "No stored instances!"),
-        }
-    }
-}
-
 impl VaultCommmand for GetLatestInstance {
     fn execute(&self) -> CommandResult {
         // Open the vault.
         let vault = Vault::new(self.directory.clone())?;
-
         // Get the experiment from the vault.
         let experiment = vault.get_experiment_err(self.experiment.as_str())?;
         // Get the instance with the largest ID and an experiment_id matching the
@@ -379,11 +389,68 @@ impl VaultCommmand for GetLatestInstance {
                 .optional(),
         )?;
         let instance_id = match res {
-            None => return GetLatestInstanceResult::new(None),
+            None => return InstanceListResult::new(None),
             Some((id, _)) => id,
         };
         let path = format!("{}/{}", vault.base_dir.as_str(), instance_id);
-        GetLatestInstanceResult::new(Some(path))
+        InstanceListResult::new(Some(vec![path]))
+    }
+}
+
+/// QueryInstances represents a vault query command.
+struct QueryInstances {
+    directory: Option<String>,
+    experiment: String,
+    query: String,
+}
+
+impl VaultCommmand for QueryInstances {
+    fn execute(&self) -> CommandResult {
+        // Open the vault.
+        let vault = Vault::new(self.directory.clone())?;
+        // Get the experiment from the vault.
+        let experiment = vault.get_experiment_err(self.experiment.as_str())?;
+        // Get the instances that the user requests.
+        #[derive(QueryableByName)]
+        struct QueryResult {
+            #[sql_type = "Text"]
+            uuid: String,
+        }
+        // TODO (rohany): Should this query move into the db::schema module?
+        // TODO (rohany): Think about how we can avoid directly writing SQL as
+        //  part of the user's query.
+        // TODO (rohany): Think about how to avoid query injection attacks.
+        let instances: Vec<QueryResult> = util::wrap_db_error(
+            diesel::sql_query(format!(
+                "
+SELECT
+    uuid
+FROM
+    (
+        SELECT
+            id, experiment_id, uuid, json(meta_text) AS meta
+        FROM
+            experiment_instance
+        WHERE
+            {}
+        ORDER BY
+            id
+    )
+WHERE
+    experiment_id = ?;
+",
+                self.query
+            ))
+            .bind::<Integer, _>(experiment.id)
+            .load(&vault.conn),
+        )?;
+        let mut dirs = Vec::new();
+        dirs.reserve(instances.len());
+        for instance in instances.iter() {
+            // TODO (rohany): This really needs to be a method on the vault.
+            dirs.push(format!("{}/{}", vault.base_dir, instance.uuid))
+        }
+        InstanceListResult::new(Some(dirs))
     }
 }
 
@@ -580,7 +647,11 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
             directory: None,
             experiment,
         }),
-        cmd => panic!("unhandled command {:?}", cmd),
+        cli::Commands::Query { experiment, query } => Box::new(QueryInstances {
+            directory: None,
+            experiment,
+            query,
+        }),
     };
     command.execute()
 }
@@ -789,6 +860,8 @@ mod datadriven_tests {
     use std::collections::HashMap;
     use std::io::Read;
 
+    const INSTANCE_FILE_NAME: &str = "instance_name";
+
     fn result_to_string(r: CommandResult) -> String {
         match r {
             Ok(f) => match f.to_string().as_str() {
@@ -796,6 +869,28 @@ mod datadriven_tests {
                 s => format!("{}\n", s),
             },
             Err(e) => format!("Error: {}\n", e.to_string()),
+        }
+    }
+
+    fn instance_list_result_to_string(b: Box<dyn VaultResult>) -> String {
+        // Downcast the result into the expected struct.
+        let latest_result = b.as_any().downcast_ref::<InstanceListResult>().unwrap();
+        match &latest_result.directory {
+            // If there isn't a latest instance, then there's nothing to do.
+            None => result_to_string(Ok(b)),
+            Some(dirs) => {
+                let mut result = String::new();
+                for dir in dirs.iter() {
+                    // s is a path to some directory. Let's read out the name of the instance
+                    // that this directory contains to see what instance is actually here.
+                    let p = path::Path::new(dir).join(INSTANCE_FILE_NAME);
+                    let mut f = fs::File::open(p).unwrap();
+                    let mut name = String::new();
+                    let _ = f.read_to_string(&mut name).unwrap();
+                    result.push_str(format!("{}\n", name).as_str())
+                }
+                result
+            }
         }
     }
 
@@ -808,7 +903,6 @@ mod datadriven_tests {
             let mut active_dirs = vec![];
             let mut vault_path = None;
             let mut instances = HashMap::new();
-            let instance_file_name = "instance_name";
             f.run(|test_case| -> String {
                 match test_case.directive.as_str() {
                     "new-vault" => {
@@ -824,7 +918,7 @@ mod datadriven_tests {
                         instances.insert(name.clone(), path);
                         // Drop a file into this directory with the name of the instance.
                         // This will be used to identify instances later.
-                        let mut f = fs::File::create(&dir.path().join(instance_file_name)).unwrap();
+                        let mut f = fs::File::create(&dir.path().join(INSTANCE_FILE_NAME)).unwrap();
                         let _ = f.write(name.as_bytes()).unwrap();
                         active_dirs.push(dir);
                         "".to_string()
@@ -869,26 +963,7 @@ mod datadriven_tests {
                             // If an error was raised, then return that directly.
                             Err(_) => result_to_string(res),
                             // If a result is returned, we have to inspect it.
-                            Ok(b) => {
-                                // Downcast the result into the expected struct.
-                                let latest_result = b
-                                    .as_any()
-                                    .downcast_ref::<GetLatestInstanceResult>()
-                                    .unwrap();
-                                match &latest_result.directory {
-                                    // If there isn't a latest instance, then there's nothing to do.
-                                    None => result_to_string(Ok(b)),
-                                    Some(s) => {
-                                        // s is a path to some directory. Let's read out the name of the instance
-                                        // that this directory contains to see what instance is actually here.
-                                        let p = path::Path::new(s).join(instance_file_name);
-                                        let mut f = fs::File::open(p).unwrap();
-                                        let mut name = String::new();
-                                        let _ = f.read_to_string(&mut name).unwrap();
-                                        format!("{}\n", name)
-                                    }
-                                }
-                            }
+                            Ok(b) => instance_list_result_to_string(b),
                         }
                     }
                     "register-experiment" => result_to_string(
@@ -910,6 +985,24 @@ mod datadriven_tests {
                             }
                             .execute(),
                         )
+                    }
+                    "query" => {
+                        let experiment = test_case.args["experiment"][0].clone();
+                        // Execute the query instance command.
+                        let res = QueryInstances {
+                            directory: Some(vault_path.as_ref().unwrap().clone()),
+                            experiment,
+                            query: test_case.input.clone(),
+                        }
+                        .execute();
+                        // Rather than just returning the output, we have to clean up the result
+                        // so that the temporary file and instance UUID aren't on display.
+                        match res {
+                            // If an error was raised, then return that directly.
+                            Err(_) => result_to_string(res),
+                            // If a result is returned, we have to inspect it.
+                            Ok(b) => instance_list_result_to_string(b),
+                        }
                     }
                     _ => panic!("unhandled directive: {}", test_case.directive),
                 }
