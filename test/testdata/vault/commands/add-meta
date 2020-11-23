@@ -21,3 +21,14 @@ list-meta instance=i
 ----
 key: k, value: overwrite
 key: k2, value: v2
+
+# Try to store the instance with metadata.
+
+new-vault
+----
+
+register-experiment name=exp
+----
+
+store-instance experiment=exp instance=i
+----

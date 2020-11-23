@@ -35,3 +35,30 @@ store-instance experiment=exp instance=i2
 get-latest experiment=exp
 ----
 i2
+
+new-instance name=i3
+----
+
+store-instance experiment=exp instance=i3
+----
+
+get-latest experiment=exp
+----
+i3
+
+register-experiment name=exp2
+----
+
+get-latest experiment=exp2
+----
+No stored instances!
+
+new-instance name=i4
+----
+
+store-instance experiment=exp2 instance=i4
+----
+
+get-latest experiment=exp2
+----
+i4

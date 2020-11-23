@@ -1,5 +1,6 @@
 /*
 
+// TODO (rohany): This comment is no longer true. It needs to be updated.
 An overall idea of how to structure this thing.
 
 There will be a VAULT_DIR that can be configured (or placed in the environment).
@@ -23,6 +24,8 @@ root
 
  */
 
+#[macro_use]
+extern crate diesel;
 mod cli;
 mod vault;
 use structopt::StructOpt;
