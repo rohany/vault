@@ -10,7 +10,9 @@ edition = "2018"
 
 [dependencies]
 any_derive = { path = "src/any_derive", version = "0.1.0" }
+chrono = "0.4"
 datadriven = "0.4.0"
+diesel = { version = "1.4.4", features = ["chrono", "sqlite"] }
 fs_extra = "1.2.0"
 serde = { version = "1.0", features = ["derive"] }
 # For simplicity, let's just start with serde_json and can switch

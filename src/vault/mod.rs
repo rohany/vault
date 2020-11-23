@@ -1,5 +1,6 @@
 use crate::cli;
 use any_derive;
+use diesel::prelude::*;
 use fs_extra;
 use serde::de;
 use serde::export::Formatter;
@@ -8,6 +9,13 @@ use std::any::Any;
 use std::io::Write;
 use std::{env, fmt, fs, io, path, result};
 use uuid;
+
+// TODO (rohany): Where's the right place to put this? Maybe the right thing
+//  is to just have module imports in mod.rs, and everything else in separate files?
+mod db;
+use db::schema;
+use db::schema::{experiment, experiment_instance};
+use diesel;
 
 /// Result is an alias for Result<T, VaultError>. It is used for uniformity
 /// among the different vault functions.
@@ -89,8 +97,8 @@ struct ExperimentMeta {
 struct Vault {
     /// base_dir is the string of the directory that contains the instance.
     base_dir: String,
-    /// metadata_handle is a handle pointing to the instance's metadata.
-    metadata_handle: VaultMetaHandle,
+    /// conn is the diesel connection to the Vault instance's database.
+    conn: SqliteConnection,
 }
 
 impl Vault {
@@ -115,63 +123,83 @@ impl Vault {
         // TODO (rohany): Perform some validation on the Vault instance.
         Ok(Vault {
             base_dir: instance_dir.to_string(),
-            metadata_handle: VaultMetaHandle::new(instance_dir)?,
+            conn: db::open(instance_dir),
         })
     }
 
-    /// open_experiment opens a mutable handle to a target experiment.
-    fn open_experiment(
-        &mut self,
-        experiment_name: &str,
-    ) -> Result<(&mut Experiment, ExperimentHandle)> {
-        let experiment = match self
-            .metadata_handle
-            .meta
-            .get_experiment_mut(experiment_name)
-        {
-            None => {
-                return Err(VaultError::UnknownExperimentError(
-                    experiment_name.to_string(),
-                ))
-            }
-            Some(e) => e,
-        };
-        // TODO (rohany): We might want to generate UUID's or something for experiments
-        //  so that they are resilient to name changes.
-        let experiment_dir = format!("{}/{}", self.base_dir, experiment_name);
-        let handle = ExperimentHandle::new(experiment_dir.as_str())?;
-        Ok((experiment, handle))
+    /// get_experiment returns the schema::Experiment with the target name, or None
+    /// if the experiment doesn't yet exist in the database.
+    fn get_experiment(&self, name: &str) -> Result<Option<schema::Experiment>> {
+        // Query the database.
+        let res = util::wrap_db_error(
+            experiment::table
+                .filter(experiment::name.like(name))
+                .first::<schema::Experiment>(&self.conn)
+                .optional(),
+        )?;
+        Ok(res)
+    }
+
+    /// get_experiment_error is the same as get_experiment but will raise a
+    /// VaultError::UnknownExperimentError if the experiment does not exist.
+    fn get_experiment_err(&self, name: &str) -> Result<schema::Experiment> {
+        match self.get_experiment(name)? {
+            Some(e) => Ok(e),
+            None => Err(VaultError::UnknownExperimentError(name.to_string())),
+        }
+    }
+
+    /// store stores the target experiment instance directory into the vault
+    /// under the target name. This operation performs a recursive copy from the
+    /// target directory into the experiment's directory.
+    fn store(&mut self, target: &str, name: &str) -> Result<()> {
+        // Create options for the copy.
+        let mut options = fs_extra::dir::CopyOptions::new();
+        // copy_inside allows us to copy the directory into a new name.
+        options.copy_inside = true;
+        let destination = format!("{}/{}", &self.base_dir, name);
+        match fs_extra::dir::copy(target, destination, &options) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(VaultError::IOStringError(e.to_string())),
+        }
     }
 
     /// register_experiment registers a new experiment in the vault.
-    fn register_experiment(&mut self, experiment: &str) -> Result<()> {
-        // See if this experiment exists already.
-        match self
-            .metadata_handle
-            .meta
-            .experiments
-            .iter()
-            .find(|e| e.name == experiment)
-        {
+    fn register_experiment(&mut self, name: &str) -> Result<()> {
+        // See whether there exists such an experiment already.
+        match self.get_experiment(name)? {
+            // If so, error out.
             Some(_) => {
                 return Err(VaultError::DuplicateExperimentError(
-                    experiment.to_string().clone(),
-                ))
+                    name.to_string().clone(),
+                ));
             }
+            // Otherwise, insert it.
             None => {
-                // Add the new experiment to the metadata.
-                self.metadata_handle.meta.experiments.push(Experiment {
-                    name: experiment.to_string(),
-                    latest_instance_id: None,
-                });
-                // Flush the changes.
-                self.metadata_handle.flush()?;
+                // Insert the experiment into the database.
+                let exp = schema::ExperimentInsert { name };
+                let _ = util::wrap_db_error(
+                    diesel::insert_into(experiment::table)
+                        .values(exp)
+                        .execute(&mut self.conn),
+                )?;
             }
         };
-        // Create a directory for this experiment in the vault.
-        let dir_name = format!("{}/{}", self.base_dir, experiment);
-        util::wrap_io_error(fs::create_dir(path::Path::new(&dir_name)))?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    /// get_experiment_instances is a method for use in testing. It returns the
+    /// UUID's of all of the instances that have been stored in the vault for a
+    /// particular experiment.
+    fn get_experiment_instances(&self, name: &str) -> Result<Vec<String>> {
+        let experiment = self.get_experiment_err(name)?;
+        util::wrap_db_error(
+            experiment_instance::table
+                .filter(experiment_instance::experiment_id.eq(experiment.id))
+                .select(experiment_instance::uuid)
+                .get_results::<String>(&self.conn),
+        )
     }
 }
 
@@ -275,39 +303,33 @@ impl VaultCommmand for StoreExperimentInstance {
     fn execute(&self) -> CommandResult {
         // Open the vault.
         let mut vault = Vault::new(self.directory.clone())?;
-        // Ensure that this experiment is registered in the vault.
-        if !vault
-            .metadata_handle
-            .meta
-            .contains_experiment(self.experiment.as_str())
-        {
-            return Err(VaultError::UnknownExperimentError(self.experiment.clone()));
-        };
-        // Read any metadata about the experiment.
+        // Generate a new ID for the instance.
+        let id = uuid::Uuid::new_v4().to_string();
+        // Get the target experiment from the vault.
+        let exp = vault.get_experiment_err(self.experiment.as_str())?;
+        // Take the instance's metadata and turn it into a JSON blob.
         let instance = ExperimentMetaCollectionHandle::new(self.instance.as_str())?;
+        let mut builder = serde_json::Map::new();
+        for meta in instance.meta.metas.iter() {
+            // TODO (rohany): A followup is to try and parse more "structured" JSON objects here.
+            let value = serde_json::Value::String(meta.value.clone());
+            builder.insert(meta.key.clone(), value);
+        }
+        // TODO (rohany): Don't panic and unwrap here.
+        let json = serde_json::to_string(&builder).unwrap();
 
-        // Open up the experiment directory.
-        let (mut experiment, mut experiment_handle) =
-            vault.open_experiment(self.experiment.as_str())?;
-
-        // Copy in the target experiment.
-        let id = uuid::Uuid::new_v4();
-        experiment_handle.store(self.instance.as_str(), &id.to_string().as_str())?;
-
-        // Write out the instance's metadata.
-        let mut instance_meta = experiment_handle.open_instance_meta(&id)?;
-        instance_meta.meta = ExperimentInstance {
-            name: self.experiment.clone(),
-            meta: instance.meta.clone(),
-            timestamp: "TODO (rohany): fill this out".to_string(),
-            id,
-        };
-        instance_meta.flush()?;
-
-        // Update the pointer to the latest instance for this experiment.
-        experiment.latest_instance_id = Some(id);
-        vault.metadata_handle.flush()?;
-
+        // Add the instance to the database.
+        let _ = util::wrap_db_error(
+            diesel::insert_into(experiment_instance::table)
+                .values(schema::ExperimentInstanceInsert {
+                    experiment_id: exp.id,
+                    uuid: id.as_str(),
+                    meta_text: json.as_str(),
+                })
+                .execute(&mut vault.conn),
+        )?;
+        // Store the instance's data in the vault.
+        vault.store(self.instance.as_str(), id.as_str())?;
         VaultUnit::new()
     }
 }
@@ -341,20 +363,26 @@ impl fmt::Display for GetLatestInstanceResult {
 
 impl VaultCommmand for GetLatestInstance {
     fn execute(&self) -> CommandResult {
-        // In an ideal world, we should reduce this to a call of Query.
-
         // Open the vault.
-        let mut vault = Vault::new(self.directory.clone())?;
+        let vault = Vault::new(self.directory.clone())?;
 
-        // Open up the target experiment.
-        let (experiment, handle) = vault.open_experiment(self.experiment.as_str())?;
-
-        let id = match experiment.latest_instance_id {
+        // Get the experiment from the vault.
+        let experiment = vault.get_experiment_err(self.experiment.as_str())?;
+        // Get the instance with the largest ID and an experiment_id matching the
+        // retrieved experiment.
+        let res = util::wrap_db_error(
+            experiment_instance::table
+                .group_by(experiment_instance::experiment_id)
+                .filter(experiment_instance::experiment_id.eq(experiment.id))
+                .select((experiment_instance::uuid, diesel::dsl::sql("max(id)")))
+                .first::<(String, i32)>(&vault.conn)
+                .optional(),
+        )?;
+        let instance_id = match res {
             None => return GetLatestInstanceResult::new(None),
-            Some(id) => id,
+            Some((id, _)) => id,
         };
-
-        let path = format!("{}/{}", handle.directory, id.to_string());
+        let path = format!("{}/{}", vault.base_dir.as_str(), instance_id);
         GetLatestInstanceResult::new(Some(path))
     }
 }
@@ -374,9 +402,11 @@ struct Meta {
 //  for inspiration.
 #[derive(Debug)]
 pub enum VaultError {
+    DatabaseError(diesel::result::Error),
     DuplicateExperimentError(String),
     UnknownExperimentError(String),
     UnsetInstanceDirectory,
+    #[allow(dead_code)]
     InvalidDirectory(String),
     #[allow(dead_code)]
     InvalidInstanceDirectory(String),
@@ -391,6 +421,7 @@ pub enum VaultError {
 impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            VaultError::DatabaseError(e) => write!(f, "Database error: {}", e),
             VaultError::DuplicateExperimentError(s) => write!(f, "experiment {} already exists", s),
             VaultError::UnknownExperimentError(s) => write!(f, "unknown experiment {}", s),
             VaultError::Unimplemented(s) => write!(f, "unimplemented command: {:?}", s),
@@ -402,69 +433,6 @@ impl fmt::Display for VaultError {
             VaultError::UnsetInstanceDirectory => {
                 write!(f, "please set VAULT_DIR in your environment")
             }
-        }
-    }
-}
-
-/// ExperimentHandle is a handle to an Experiment directory.
-struct ExperimentHandle {
-    directory: String,
-}
-
-impl ExperimentHandle {
-    /// new creates an ExperimentHandle from an input directory.
-    fn new(directory: &str) -> Result<ExperimentHandle> {
-        match path::Path::new(directory).is_dir() {
-            true => Ok(ExperimentHandle {
-                directory: directory.to_string(),
-            }),
-            false => Err(VaultError::InvalidDirectory(directory.to_string())),
-        }
-    }
-
-    /// store stores the target experiment instance directory into the experiment
-    /// under the target name. This operation performs a recursive copy from the
-    /// target directory into the experiment's directory.
-    fn store(&mut self, target: &str, name: &str) -> Result<()> {
-        // Create options for the copy.
-        let mut options = fs_extra::dir::CopyOptions::new();
-        // copy_inside allows us to copy the directory into a new name.
-        options.copy_inside = true;
-        let destination = format!("{}/{}", &self.directory, name);
-        match fs_extra::dir::copy(target, destination, &options) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(VaultError::IOStringError(e.to_string())),
-        }
-    }
-
-    /// open_instance_meta opens a handle to an experiment instance with the input ID.
-    fn open_instance_meta(&mut self, id: &uuid::Uuid) -> Result<ExperimentInstanceHandle> {
-        // TODO (rohany): All of these key construction routines should become functions.
-        let dir = format!("{}/{}", &self.directory, id.to_string());
-        ExperimentInstanceHandle::new(dir.as_str())
-    }
-
-    #[allow(dead_code)]
-    /// iter_instances returns an Iterator to all available instances of the experiment.
-    fn iter_instances(&mut self) -> Result<InstanceIterator> {
-        let dirs = util::wrap_io_error(fs::read_dir(&self.directory))?;
-        Ok(InstanceIterator { dirs })
-    }
-}
-
-/// InstanceIterator is an Iterator through all instances in an experiment.
-struct InstanceIterator {
-    dirs: fs::ReadDir,
-}
-
-impl Iterator for InstanceIterator {
-    type Item = Result<ExperimentInstanceHandle>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.dirs.next() {
-            None => None,
-            Some(Err(e)) => Some(Err(VaultError::IOError(e))),
-            Some(Ok(dir)) => Some(ExperimentInstanceHandle::new(dir.path().to_str().unwrap())),
         }
     }
 }
@@ -517,29 +485,13 @@ impl FileHandle {
 }
 
 // Constants for metadata filenames.
-const INSTANCE_META_FILENAME: &str = ".instancemeta";
 const EXPERIMENT_META_FILENAME: &str = ".experimentmeta";
-const VAULT_META_FILENAME: &str = ".vaultmeta";
 
 // Type definitions for standard users of MetadataHandle.
-type ExperimentInstanceHandle = MetadataHandle<ExperimentInstance>;
-impl ExperimentInstanceHandle {
-    fn new(dir: &str) -> Result<ExperimentInstanceHandle> {
-        MetadataHandle::new_from_dir(dir, INSTANCE_META_FILENAME)
-    }
-}
-
 type ExperimentMetaCollectionHandle = MetadataHandle<ExperimentMetaCollection>;
 impl ExperimentMetaCollectionHandle {
     fn new(dir: &str) -> Result<ExperimentMetaCollectionHandle> {
         MetadataHandle::new_from_dir(dir, EXPERIMENT_META_FILENAME)
-    }
-}
-
-type VaultMetaHandle = MetadataHandle<VaultMeta>;
-impl VaultMetaHandle {
-    fn new(dir: &str) -> Result<VaultMetaHandle> {
-        MetadataHandle::new_from_dir(dir, VAULT_META_FILENAME)
     }
 }
 
@@ -595,38 +547,6 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-/// VaultMeta is the serialized metadata that corresponds to a vault instance.
-struct VaultMeta {
-    experiments: Vec<Experiment>,
-    // TODO (rohany): Include a version here?
-    // TODO (rohany): Include a "modified" timestamp here.
-}
-
-impl VaultMeta {
-    /// contains_experiment returns whether a given experiment is registered in this meta.
-    fn contains_experiment(&self, experiment: &str) -> bool {
-        match self.get_experiment(experiment) {
-            Some(_) => true,
-            None => false,
-        }
-    }
-
-    /// get_experiment returns a reference to an experiment's metadata from the vault.
-    fn get_experiment(&self, experiment: &str) -> Option<&Experiment> {
-        self.experiments
-            .iter()
-            .find(|e| e.name.as_str() == experiment)
-    }
-
-    /// get_experiment_mut returns a mutable reference to an experiment's metadata from the vault.
-    fn get_experiment_mut(&mut self, experiment: &str) -> Option<&mut Experiment> {
-        self.experiments
-            .iter_mut()
-            .find(|e| e.name.as_str() == experiment)
-    }
-}
-
 // TODO (rohany): This should maybe go into the cli module.
 /// dispatch_command_line takes a cli::Commands and dispatches to the
 /// corresponding vault execution code.
@@ -668,6 +588,7 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
 /// util contains different utility methods.
 mod util {
     use crate::vault::{Result, VaultError};
+    use diesel;
     use std::any::Any;
     use std::io;
 
@@ -676,6 +597,16 @@ mod util {
         match r {
             Ok(v) => Ok(v),
             Err(e) => Err(VaultError::IOError(e)),
+        }
+    }
+
+    // TODO (rohany): Make these functions parametric over the error type too?
+
+    /// wrap_db_error unwraps a diesel::QueryResult into a vault::Result.
+    pub fn wrap_db_error<T>(r: diesel::QueryResult<T>) -> Result<T> {
+        match r {
+            Ok(v) => Ok(v),
+            Err(e) => Err(VaultError::DatabaseError(e)),
         }
     }
 
@@ -746,11 +677,14 @@ mod testutils {
 
 #[cfg(test)]
 mod store {
+    use crate::vault::db::schema;
+    use crate::vault::db::schema::{experiment, experiment_instance};
     use crate::vault::testutils::assert_file_contents;
     use crate::vault::{
         AddExperimentMeta, RegisterExperiment, StoreExperimentInstance, Vault, VaultCommmand,
         VaultError,
     };
+    use diesel::{QueryDsl, RunQueryDsl};
     use std::fs;
     use std::io::Write;
 
@@ -816,33 +750,17 @@ mod store {
         .execute()
         .unwrap();
 
-        // Start to verify that the experiment structure is as expected.
-        let mut vault = Vault::new_from_dir(vault_path.as_str()).unwrap();
-        let (_, mut experiment) = vault.open_experiment("exp").unwrap();
-        let mut instances = experiment.iter_instances().unwrap();
-        let instance = instances.next().unwrap().unwrap();
-        // There should only be one instance, so another call to next must fail.
-        match instances.next() {
-            None => {}
-            Some(_) => panic!("expected None, found Some"),
-        };
-        // The instance should have the key-value that we want.
-        assert_eq!(instance.meta.name, "exp");
-        assert_eq!(
-            instance
-                .meta
-                .meta
-                .metas
-                .iter()
-                .find(|m| m.key == "key")
-                .unwrap()
-                .value,
-            "value"
-        );
-        // We should find the files that placed in the experiment.
-        let path = format!("{}/{}/a", experiment.directory, &instance.meta.id);
+        // Verify that the experiment structure is as expected.
+        let vault = Vault::new_from_dir(vault_path.as_str()).unwrap();
+        let instances = vault.get_experiment_instances("exp").unwrap();
+        // There should only be one instance.
+        assert_eq!(instances.len(), 1);
+        let instance = instances[0].as_str();
+
+        // // We should find the files that placed in the experiment.
+        let path = format!("{}/{}/a", vault.base_dir, instance);
         assert_file_contents(fs::File::open(path).unwrap(), "hello");
-        let path = format!("{}/{}/dir/b", experiment.directory, &instance.meta.id);
+        let path = format!("{}/{}/dir/b", vault.base_dir, instance);
         assert_file_contents(fs::File::open(path).unwrap(), "hello2");
 
         // The original experiment directory should not have been altered.
@@ -850,6 +768,17 @@ mod store {
         assert_file_contents(fs::File::open(path).unwrap(), "hello");
         let path = format!("{}/dir/b", &exp_path);
         assert_file_contents(fs::File::open(path).unwrap(), "hello2");
+
+        let rows: Vec<(schema::Experiment, schema::ExperimentInstance)> = experiment::table
+            .inner_join(experiment_instance::table)
+            .load(&vault.conn)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (exp, inst) = &rows[0];
+        // Double check that SQLite is upholding FK relationships, because why not?
+        assert_eq!(exp.id, inst.experiment_id);
+        assert_eq!(exp.name, "exp");
+        assert_eq!(inst.meta_text, r#"{"key":"value"}"#);
     }
 }
 
