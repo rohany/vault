@@ -1,0 +1,81 @@
+new-vault
+----
+
+register-experiment name=exp
+----
+
+new-instance name=i1
+----
+
+new-instance name=i2
+----
+
+add-meta instance=i1 key=key value=a
+----
+
+add-meta instance=i2 key=key value=b
+----
+
+store-instance experiment=exp instance=i1
+----
+
+store-instance experiment=exp instance=i2
+----
+
+query experiment=exp
+json_extract(meta, '$.key') = 'a'
+----
+i1
+
+query experiment=exp
+json_extract(meta, '$.key') = 'b'
+----
+i2
+
+# Test that nothing goes wrong trying to access a field that doesn't exist.
+query experiment=exp
+json_extract(meta, '$.doesntexist') = 'b'
+----
+
+# Test that we can write queries that return multiple instances.
+query experiment=exp
+json_extract(meta, '$.key') = 'b' OR json_extract(meta, '$.key') = 'a'
+----
+i1
+i2
+
+# Try some reasonable use case with integers and a more complicated query.
+new-instance name=i3
+----
+
+add-meta instance=i3 key=score value=95
+----
+
+add-meta instance=i3 key=key value=b
+----
+
+new-instance name=i4
+----
+
+add-meta instance=i4 key=score value=100
+----
+
+add-meta instance=i4 key=key value=c
+----
+
+store-instance experiment=exp instance=i3
+----
+
+store-instance experiment=exp instance=i4
+----
+
+query experiment=exp
+json_extract(meta, '$.score') > 90 AND json_extract(meta, '$.key') = 'b'
+----
+i3
+
+query experiment=exp
+json_extract(meta, '$.score') > 90
+----
+i3
+i4

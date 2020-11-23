@@ -7,8 +7,8 @@ use structopt::StructOpt;
 ///   * vault store <experiment_name> <instance_directory>
 ///   * vault add-meta <instance_directory> <key> <value>
 ///   * vault list-meta <instance_directory>
-///   * vault get-latest <experiment_mame>
-///   * vault query ...
+///   * vault get-latest <experiment_name>
+///   * vault query <experiment_name> <query>
 pub enum Commands {
     Register {
         experiment: String,
@@ -30,5 +30,8 @@ pub enum Commands {
     GetLatest {
         experiment: String,
     },
-    Query,
+    Query {
+        experiment: String,
+        query: String,
+    },
 }
