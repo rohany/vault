@@ -2,7 +2,6 @@ use crate::cli;
 use any_derive;
 use fs_extra;
 use serde::de;
-use serde::export::fmt::Display;
 use serde::export::Formatter;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -97,12 +96,18 @@ struct Vault {
 impl Vault {
     /// new creates a new Vault. It uses the environment's VAULT_DIR as the
     /// instance's base_dir.
-    fn new() -> Result<Vault> {
-        let base_dir = match env::var_os("VAULT_DIR") {
-            Some(dir) => dir,
-            None => return Err(VaultError::UnsetInstanceDirectory),
+    fn new(vault_dir: Option<String>) -> Result<Vault> {
+        let dir = match vault_dir {
+            Some(s) => s,
+            None => (match env::var_os("VAULT_DIR") {
+                Some(dir) => dir,
+                None => return Err(VaultError::UnsetInstanceDirectory),
+            })
+            .to_str()
+            .unwrap()
+            .to_string(),
         };
-        Vault::new_from_dir(base_dir.to_str().unwrap())
+        Vault::new_from_dir(dir.as_str())
     }
 
     /// new_from_dir creates a new Vault from the input instance directory.
@@ -253,10 +258,7 @@ struct RegisterExperiment {
 impl VaultCommmand for RegisterExperiment {
     fn execute(&self) -> CommandResult {
         // Open the vault.
-        let mut vault = match &self.directory {
-            Some(d) => Vault::new_from_dir(d.as_str()),
-            None => Vault::new(),
-        }?;
+        let mut vault = Vault::new(self.directory.clone())?;
         vault.register_experiment(self.experiment.as_str())?;
         VaultUnit::new()
     }
@@ -272,11 +274,7 @@ struct StoreExperimentInstance {
 impl VaultCommmand for StoreExperimentInstance {
     fn execute(&self) -> CommandResult {
         // Open the vault.
-        // TODO (rohany): Make the new_from_dir take in an option!
-        let mut vault = match &self.directory {
-            Some(d) => Vault::new_from_dir(d.as_str()),
-            None => Vault::new(),
-        }?;
+        let mut vault = Vault::new(self.directory.clone())?;
         // Ensure that this experiment is registered in the vault.
         if !vault
             .metadata_handle
@@ -346,10 +344,7 @@ impl VaultCommmand for GetLatestInstance {
         // In an ideal world, we should reduce this to a call of Query.
 
         // Open the vault.
-        let mut vault = match &self.directory {
-            Some(d) => Vault::new_from_dir(d.as_str()),
-            None => Vault::new(),
-        }?;
+        let mut vault = Vault::new(self.directory.clone())?;
 
         // Open up the target experiment.
         let (experiment, handle) = vault.open_experiment(self.experiment.as_str())?;
@@ -862,7 +857,6 @@ mod datadriven_tests {
     use datadriven::walk;
     use std::collections::HashMap;
     use std::io::Read;
-    use std::ops::Deref;
 
     fn result_to_string(r: CommandResult) -> String {
         match r {
