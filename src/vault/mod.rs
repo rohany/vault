@@ -150,15 +150,15 @@ impl Vault {
         }
     }
 
-    /// store stores the target experiment instance directory into the vault
+    /// store_instance stores the target experiment instance directory into the vault
     /// under the target name. This operation performs a recursive copy from the
     /// target directory into the experiment's directory.
-    fn store(&mut self, target: &str, name: &str) -> Result<()> {
+    fn store_instance(&mut self, target: &str, id: &str) -> Result<()> {
         // Create options for the copy.
         let mut options = fs_extra::dir::CopyOptions::new();
         // copy_inside allows us to copy the directory into a new name.
         options.copy_inside = true;
-        let destination = format!("{}/{}", &self.base_dir, name);
+        let destination = self.make_instance_path(id);
         match fs_extra::dir::copy(target, destination, &options) {
             Ok(_) => Ok(()),
             Err(e) => Err(VaultError::IOStringError(e.to_string())),
@@ -187,6 +187,12 @@ impl Vault {
             }
         };
         Ok(())
+    }
+
+    /// make_instance_path returns the physical path to the directory of the
+    /// instance with the input ID.
+    fn make_instance_path(&self, id: &str) -> String {
+        format!("{}/{}", self.base_dir, id)
     }
 
     #[cfg(test)]
@@ -330,7 +336,7 @@ impl VaultCommmand for StoreExperimentInstance {
                 .execute(&mut vault.conn),
         )?;
         // Store the instance's data in the vault.
-        vault.store(self.instance.as_str(), id.as_str())?;
+        vault.store_instance(self.instance.as_str(), id.as_str())?;
         VaultUnit::new()
     }
 }
@@ -392,7 +398,7 @@ impl VaultCommmand for GetLatestInstance {
             None => return InstanceListResult::new(None),
             Some((id, _)) => id,
         };
-        let path = format!("{}/{}", vault.base_dir.as_str(), instance_id);
+        let path = vault.make_instance_path(&instance_id);
         InstanceListResult::new(Some(vec![path]))
     }
 }
@@ -447,8 +453,7 @@ WHERE
         let mut dirs = Vec::new();
         dirs.reserve(instances.len());
         for instance in instances.iter() {
-            // TODO (rohany): This really needs to be a method on the vault.
-            dirs.push(format!("{}/{}", vault.base_dir, instance.uuid))
+            dirs.push(vault.make_instance_path(&instance.uuid))
         }
         InstanceListResult::new(Some(dirs))
     }
