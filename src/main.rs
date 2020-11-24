@@ -24,8 +24,12 @@ root
 
  */
 
+// Procedural macro imports.
 #[macro_use]
 extern crate diesel;
+#[macro_use]
+extern crate diesel_migrations;
+
 mod cli;
 mod vault;
 use structopt::StructOpt;

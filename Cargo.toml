@@ -6,18 +6,27 @@ edition = "2018"
 
 [workspace]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+# Registration of a sub-crate providing a custom derive macro.
 any_derive = { path = "src/any_derive", version = "0.1.0" }
+# Allows use of some time related data types.
 chrono = "0.4"
+# CockroachDB style data-driven testing package.
 datadriven = "0.4.0"
+# Database driver.
 diesel = { version = "1.4.4", features = ["chrono", "sqlite"] }
+# Diesel's migration manager.
+diesel_migrations = "1.4.0"
+# Allows use of a "cp -r" command within rust.
 fs_extra = "1.2.0"
+# Provides the serialization and deserialization utilities.
 serde = { version = "1.0", features = ["derive"] }
 # For simplicity, let's just start with serde_json and can switch
 # over to bincode once this project gets a little more off the ground.
 serde_json = "1.0"
+# Use for automatic generation of CLI arguments.
 structopt = "0.3.13"
+# Temporary directories.
 tempdir = "0.3.7"
+# UUID support.
 uuid = { version = "0.8", features = ["serde", "v4"] }
