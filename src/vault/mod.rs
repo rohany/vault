@@ -215,30 +215,84 @@ impl Vault {
 struct AddExperimentMeta {
     /// directory is the directory corresponding to an experiment instance.
     directory: String,
-    // TODO (rohany): We could probably just make these &str's.
-    key: String,
-    value: String,
+    meta: AddExperimentMetaArgs,
+}
+
+#[derive(Debug)]
+/// AddExperimentMetaArgs represent the kind of metadata that can be added
+/// using an add-meta command.
+enum AddExperimentMetaArgs {
+    KV { key: String, value: String },
+    JSON { json: String },
 }
 
 impl VaultCommmand for AddExperimentMeta {
     fn execute(&self) -> CommandResult {
         // Get a handle on the experiment's metadata.
         let mut handle = ExperimentMetaCollectionHandle::new(self.directory.as_str())?;
-        // See if this key exists already.
-        match handle
-            .meta
-            .metas
-            .iter_mut()
-            .filter(|m| m.key.as_str() == self.key.as_str())
-            .next()
-        {
-            // If the key exists already, replace the value with the new one.
-            Some(v) => v.value = self.value.clone(),
-            // Otherwise, add the new key.
-            None => handle.meta.metas.push(ExperimentMeta {
-                key: self.key.clone(),
-                value: self.value.clone(),
-            }),
+        // Construct the metadata out of the user's input.
+        let metas = match &self.meta {
+            AddExperimentMetaArgs::KV { key, value } => vec![ExperimentMeta {
+                key: key.clone(),
+                value: value.clone(),
+            }],
+            AddExperimentMetaArgs::JSON { json } => {
+                // In the JSON case, we need to attempt to deserialize the JSON into a map.
+                let parsed: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(o) => o,
+                    Err(e) => return Err(VaultError::JSONError(e)),
+                };
+                // Get out the parsed data as a Dict.
+                let data = match parsed.as_object() {
+                    Some(m) => m,
+                    None => {
+                        return Err(VaultError::InvalidJSONError(
+                            "expected JSON dictionary".into(),
+                        ))
+                    }
+                };
+                // TODO (rohany): For now, I'm not allowing nested JSON objects.
+                data.iter()
+                    .map(|v| {
+                        let value = match v.1 {
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::String(s) => s.clone(),
+                            // The remaining cases of NULL, ARRAY and OBJECT are errors.
+                            _ => {
+                                return Err(VaultError::InvalidJSONError(
+                                    format! {"{} was not a string", v.1.to_string()},
+                                ))
+                            }
+                        };
+                        Ok(ExperimentMeta {
+                            key: v.0.clone(),
+                            value,
+                        })
+                    })
+                    .collect::<Result<Vec<ExperimentMeta>>>()?
+            }
+        };
+
+        // TODO (rohany): Make this loop not an O(N^2) loop.
+        // Add all of the metadata into the instance meta.
+        for meta in metas.iter() {
+            // See if this key exists already.
+            match handle
+                .meta
+                .metas
+                .iter_mut()
+                .filter(|m| m.key.as_str() == &meta.key)
+                .next()
+            {
+                // If the key exists already, replace the value with the new one.
+                Some(v) => v.value = meta.value.clone(),
+                // Otherwise, add the new key.
+                None => handle.meta.metas.push(ExperimentMeta {
+                    key: meta.key.clone(),
+                    value: meta.value.clone(),
+                }),
+            }
         }
         handle.flush()?;
         VaultUnit::new()
@@ -478,10 +532,12 @@ pub enum VaultError {
     DuplicateExperimentError(String),
     UnknownExperimentError(String),
     UnsetInstanceDirectory,
+    JSONError(serde_json::Error),
     #[allow(dead_code)]
     InvalidDirectory(String),
     #[allow(dead_code)]
     InvalidInstanceDirectory(String),
+    InvalidJSONError(String),
     #[allow(dead_code)]
     Unimplemented(String),
     // It is unfortunate to have both of the below.
@@ -501,6 +557,8 @@ impl fmt::Display for VaultError {
             VaultError::IOStringError(s) => write!(f, "IO error: {}", s),
             VaultError::SerializationError(s) => write!(f, "Serialization error: {}", s),
             VaultError::InvalidDirectory(s) => write!(f, "{} is not a valid directory", s),
+            VaultError::JSONError(e) => write!(f, "JSON parsing error: {}", e),
+            VaultError::InvalidJSONError(s) => write!(f, "Invalid JSON: {}", s),
             VaultError::InvalidInstanceDirectory(_) => write!(f, "ROHANY WRITE A MESSAGE HERE"),
             VaultError::UnsetInstanceDirectory => {
                 write!(f, "please set VAULT_DIR in your environment")
@@ -626,15 +684,16 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
     // We could not do an allocation here and instead just call the trait
     // method in each of the cases, but I wanted to play around with traits.
     let command: Box<dyn VaultCommmand> = match args {
-        cli::Commands::AddMeta {
-            directory,
-            key,
-            value,
-        } => Box::new(AddExperimentMeta {
-            directory,
-            key,
-            value,
-        }),
+        cli::Commands::AddMeta { directory, meta } => match meta {
+            cli::AddMetaKind::KV { key, value } => Box::new(AddExperimentMeta {
+                directory,
+                meta: AddExperimentMetaArgs::KV { key, value },
+            }),
+            cli::AddMetaKind::JSON { json } => Box::new(AddExperimentMeta {
+                directory,
+                meta: AddExperimentMetaArgs::JSON { json },
+            }),
+        },
         cli::Commands::ListMeta { directory } => Box::new(ListInstanceMeta { directory }),
         cli::Commands::Register { experiment } => Box::new(RegisterExperiment {
             directory: None,
@@ -757,8 +816,8 @@ mod store {
     use crate::vault::db::schema::{experiment, experiment_instance};
     use crate::vault::testutils::assert_file_contents;
     use crate::vault::{
-        AddExperimentMeta, RegisterExperiment, StoreExperimentInstance, Vault, VaultCommmand,
-        VaultError,
+        AddExperimentMeta, AddExperimentMetaArgs, RegisterExperiment, StoreExperimentInstance,
+        Vault, VaultCommmand, VaultError,
     };
     use diesel::{QueryDsl, RunQueryDsl};
     use std::fs;
@@ -811,8 +870,10 @@ mod store {
         // Add some meta-data to this experiment directory.
         AddExperimentMeta {
             directory: exp_path.clone(),
-            key: "key".to_string(),
-            value: "value".to_string(),
+            meta: AddExperimentMetaArgs::KV {
+                key: "key".to_string(),
+                value: "value".to_string(),
+            },
         }
         .execute()
         .unwrap();
@@ -932,13 +993,24 @@ mod datadriven_tests {
                         let instance = instances
                             .get(test_case.args["instance"][0].as_str())
                             .unwrap();
-                        let key = test_case.args["key"][0].clone();
-                        let value = test_case.args["value"][0].clone();
                         result_to_string(
-                            AddExperimentMeta {
-                                directory: instance.clone(),
-                                key,
-                                value,
+                            // If the test case uses JSON, then pull that out of the input. Otherwise,
+                            // assume that key-value pairs will be passed in.
+                            match test_case.args.get("json") {
+                                Some(_) => AddExperimentMeta {
+                                    directory: instance.clone(),
+                                    meta: AddExperimentMetaArgs::JSON {
+                                        json: test_case.input.clone(),
+                                    },
+                                },
+                                None => {
+                                    let key = test_case.args["key"][0].clone();
+                                    let value = test_case.args["value"][0].clone();
+                                    AddExperimentMeta {
+                                        directory: instance.clone(),
+                                        meta: AddExperimentMetaArgs::KV { key, value },
+                                    }
+                                }
                             }
                             .execute(),
                         )
