@@ -32,3 +32,43 @@ register-experiment name=exp
 
 store-instance experiment=exp instance=i
 ----
+
+# Test for adding JSON with the add-meta command.
+add-meta instance=i json
+{"k3": "js", "k4": 3, "k5": false}
+----
+
+list-meta instance=i
+----
+key: k, value: overwrite
+key: k2, value: v2
+key: k3, value: js
+key: k4, value: 3
+key: k5, value: false
+
+# We should get an error trying to more complex JSON types.
+add-meta instance=i json
+{"k3": null}
+----
+Error: Invalid JSON: null was not a string
+
+add-meta instance=i json
+{"k3": [1, 2]}
+----
+Error: Invalid JSON: [1,2] was not a string
+
+add-meta instance=i json
+{"k3": {"k4": 5}}
+----
+Error: Invalid JSON: {"k4":5} was not a string
+
+# Error out on invalid JSON.
+add-meta instance=i json
+{"k3": null
+----
+Error: JSON parsing error: EOF while parsing an object at line 2 column 0
+
+add-meta instance=i json
+5
+----
+Error: Invalid JSON: expected JSON dictionary

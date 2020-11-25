@@ -21,8 +21,8 @@ pub enum Commands {
     // on their experiment.
     AddMeta {
         directory: String,
-        key: String,
-        value: String,
+        #[structopt(subcommand)]
+        meta: AddMetaKind,
     },
     ListMeta {
         directory: String,
@@ -34,4 +34,12 @@ pub enum Commands {
         experiment: String,
         query: String,
     },
+}
+
+#[derive(StructOpt, Debug)]
+// AddMetaKind represents a kind of metadata to add to an instance. This data
+// can either be a single key-value pair, or a JSON set of key-value pairs.
+pub enum AddMetaKind {
+    KV { key: String, value: String },
+    JSON { json: String },
 }
