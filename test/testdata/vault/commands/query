@@ -79,3 +79,8 @@ json_extract(meta, '$.score') > 90
 ----
 i3
 i4
+
+query experiment=exp
+cast(json_extract(meta, '$.score') as int) > 96
+----
+i4
