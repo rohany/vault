@@ -1,0 +1,50 @@
+cmd
+register exp1
+----
+
+# Ensure that we can't re-register an experiment.
+cmd
+register exp1
+----
+Error: experiment exp1 already exists
+
+# get-latest and query should return nothing on an empty experiment.
+cmd
+get-latest exp1
+----
+No stored instances!
+
+cmd
+query exp1 true
+----
+
+cmd
+get-latest exp2
+----
+Error: unknown experiment exp2
+
+cmd
+query exp2 true
+----
+Error: unknown experiment exp2
+
+new-instance name=i
+----
+
+cmd
+add-meta tempdir=i kv key value
+----
+
+cmd
+add-meta tempdir=i json {"key2":"value2"}
+----
+
+cmd
+list-meta tempdir=i
+----
+key: key, value: value
+key: key2, value: value2
+
+cmd
+store exp1 tempdir=i
+----

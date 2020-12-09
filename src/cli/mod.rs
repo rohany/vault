@@ -9,6 +9,8 @@ use structopt::StructOpt;
 ///   * vault list-meta <instance_directory>
 ///   * vault get-latest <experiment_name>
 ///   * vault query <experiment_name> <query>
+//
+// All commands here must be included in integration tests in tests/cli.rs.
 pub enum Commands {
     Register {
         experiment: String,

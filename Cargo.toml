@@ -6,6 +6,10 @@ edition = "2018"
 
 [workspace]
 
+[dev-dependencies]
+# Allows us to write integration tests using the generated binary more easily.
+assert_cmd = "1.0.2"
+
 [build-dependencies]
 # The same parsing crates as in dependencies. These are needed so that
 # the build.rs build script can complete.
