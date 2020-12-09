@@ -971,7 +971,7 @@ mod datadriven_tests {
 
     #[test]
     fn run() {
-        walk("test/testdata/vault/commands", |f| {
+        walk("tests/testdata/vault/commands", |f| {
             // In order to avoid temporary directories from being cleaned up
             // when their references go out of scope, we collect them all so that
             // they can be dropped at the end of the test.

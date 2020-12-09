@@ -335,7 +335,7 @@ mod trans_test {
 
     #[test]
     fn datadriven() {
-        walk("test/testdata/vault/dsl/translate", |f| {
+        walk("tests/testdata/vault/dsl/translate", |f| {
             f.run(|test_case| -> String {
                 match test_case.directive.as_str() {
                     "trans" => {
