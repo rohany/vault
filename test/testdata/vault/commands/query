@@ -23,23 +23,23 @@ store-instance experiment=exp instance=i2
 ----
 
 query experiment=exp
-json_extract(meta, '$.key') = 'a'
+meta['key'] == 'a'
 ----
 i1
 
 query experiment=exp
-json_extract(meta, '$.key') = 'b'
+meta['key'] == 'b'
 ----
 i2
 
 # Test that nothing goes wrong trying to access a field that doesn't exist.
 query experiment=exp
-json_extract(meta, '$.doesntexist') = 'b'
+meta['doesntexist'] = 'b'
 ----
 
 # Test that we can write queries that return multiple instances.
 query experiment=exp
-json_extract(meta, '$.key') = 'b' OR json_extract(meta, '$.key') = 'a'
+meta['key'] == 'b' OR meta['key'] == 'a'
 ----
 i1
 i2
@@ -70,17 +70,17 @@ store-instance experiment=exp instance=i4
 ----
 
 query experiment=exp
-json_extract(meta, '$.score') > 90 AND json_extract(meta, '$.key') = 'b'
+meta['score'] > 90 AND meta['key'] = 'b'
 ----
 i3
 
 query experiment=exp
-json_extract(meta, '$.score') > 90
+meta['score'] > 90
 ----
 i3
 i4
 
 query experiment=exp
-cast(json_extract(meta, '$.score') as int) > 96
+meta['score']::int > 96
 ----
 i4

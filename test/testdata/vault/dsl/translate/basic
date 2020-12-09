@@ -1,0 +1,102 @@
+# Translation of constants.
+trans
+5
+----
+5
+
+trans
+null
+----
+NULL
+
+trans
+5.1
+----
+5.1
+
+trans
+'aaa'
+----
+'aaa'
+
+trans
+true
+----
+true
+
+# Translation of expressions.
+trans
+5 + 5
+----
+5 + 5
+
+trans
+5 * 5
+----
+5 * 5
+
+trans
+5 - 5
+----
+5 - 5
+
+trans
+5 / 5
+----
+5 / 5
+
+trans
+5 % 5
+----
+5 % 5
+
+trans
+true AND false
+----
+true AND false
+
+trans
+true OR false
+----
+true OR false
+
+trans
+5 == 5 AND 5 > 5 AND 5 >= 5 AND 5 < 5 AND 5 <= 5
+----
+5 = 5 AND 5 > 5 AND 5 >= 5 AND 5 < 5 AND 5 <= 5
+
+trans
+fun1(1, 'a')
+----
+fun1(1, 'a')
+
+trans
+null::int
+----
+CAST(NULL AS int)
+
+trans
+((((5::float))))
+----
+((((CAST(5 AS float)))))
+
+# Translation of the JSON access operator.
+trans
+meta['key1']
+----
+json_extract(meta, '$.key1')
+
+trans
+meta['key1']['key2']
+----
+json_extract(json_extract(meta, '$.key1'), '$.key2')
+
+trans
+meta['key1']['key2']['key3']
+----
+json_extract(json_extract(json_extract(meta, '$.key1'), '$.key2'), '$.key3')
+
+trans
+meta['key1']::int > 100
+----
+CAST(json_extract(meta, '$.key1') AS int) > 100

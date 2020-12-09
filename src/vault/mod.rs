@@ -18,6 +18,8 @@ use db::schema::{experiment, experiment_instance};
 use diesel;
 use diesel::sql_types::{Integer, Text};
 
+mod dsl;
+
 /// Result is an alias for Result<T, VaultError>. It is used for uniformity
 /// among the different vault functions.
 pub type Result<T> = result::Result<T, VaultError>;
@@ -470,6 +472,11 @@ impl VaultCommmand for QueryInstances {
         let vault = Vault::new(self.directory.clone())?;
         // Get the experiment from the vault.
         let experiment = vault.get_experiment_err(self.experiment.as_str())?;
+        // Translate the input Vault DSL into a SQL predicate.
+        let predicate = match dsl::query_string_to_sqlite(&self.query) {
+            Ok(s) => s,
+            Err(e) => return Err(VaultError::DSLError(e)),
+        };
         // Get the instances that the user requests.
         #[derive(QueryableByName)]
         struct QueryResult {
@@ -499,7 +506,7 @@ FROM
 WHERE
     experiment_id = ?;
 ",
-                self.query
+                predicate
             ))
             .bind::<Integer, _>(experiment.id)
             .load(&vault.conn),
@@ -544,6 +551,7 @@ pub enum VaultError {
     IOError(io::Error),
     IOStringError(String),
     SerializationError(String),
+    DSLError(String),
 }
 
 impl fmt::Display for VaultError {
@@ -551,6 +559,7 @@ impl fmt::Display for VaultError {
         match self {
             VaultError::DatabaseError(e) => write!(f, "Database error: {}", e),
             VaultError::DuplicateExperimentError(s) => write!(f, "experiment {} already exists", s),
+            VaultError::DSLError(s) => write!(f, "Vault DSL Error: {}", s),
             VaultError::UnknownExperimentError(s) => write!(f, "unknown experiment {}", s),
             VaultError::Unimplemented(s) => write!(f, "unimplemented command: {:?}", s),
             VaultError::IOError(e) => write!(f, "IO error: {}", e),
