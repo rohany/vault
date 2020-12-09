@@ -6,6 +6,13 @@ edition = "2018"
 
 [workspace]
 
+[build-dependencies]
+# The same parsing crates as in dependencies. These are needed so that
+# the build.rs build script can complete.
+cfgrammar = "0.9"
+lrlex = "0.9"
+lrpar = "0.9"
+
 [dependencies]
 # Registration of a sub-crate providing a custom derive macro.
 any_derive = { path = "src/any_derive", version = "0.1.0" }
@@ -30,3 +37,8 @@ structopt = "0.3.13"
 tempdir = "0.3.7"
 # UUID support.
 uuid = { version = "0.8", features = ["serde", "v4"] }
+
+# Crates needed for parsing.
+cfgrammar = "0.9"
+lrlex = "0.9"
+lrpar = "0.9"
