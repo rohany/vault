@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
@@ -66,6 +67,15 @@ pub enum Commands {
         /// Query in the Vault Query DSL (detailed in [TODO (rohany)]).
         query: String,
     },
+    Weija {
+        #[structopt(
+            long = "--kind",
+            default_value = "instance-dir",
+            possible_values = &["instance-dir", "instance-id"],
+            case_insensitive = true
+        )]
+        kind: InstanceResultKind,
+    },
 }
 
 #[derive(StructOpt, Debug)]
@@ -77,4 +87,22 @@ pub enum AddMetaKind {
     KV { key: String, value: String },
     /// Add all of the key-value pairs in a JSON dictionary.
     JSON { json: String },
+}
+
+#[derive(Debug)]
+pub enum InstanceResultKind {
+    InstanceDirectory,
+    InstanceID,
+}
+
+impl FromStr for InstanceResultKind {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let as_lower = s.to_lowercase();
+        match as_lower.as_str() {
+            "instance-dir" => Ok(InstanceResultKind::InstanceDirectory),
+            "instance-id" => Ok(InstanceResultKind::InstanceID),
+            _ => Err("Unknown instance kind"),
+        }
+    }
 }

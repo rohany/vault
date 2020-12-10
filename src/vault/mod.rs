@@ -725,6 +725,7 @@ pub fn dispatch_command_line(args: cli::Commands) -> CommandResult {
             experiment,
             query,
         }),
+        _ => panic!("aa"),
     };
     command.execute()
 }
